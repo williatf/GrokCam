@@ -97,12 +97,13 @@ class SprocketDetector:
             # If too tall (likely torn), reconstruct height from expected_pitch
             if self.expected_pitch and h > self.expected_pitch * 1.5:
                 h = int(self.expected_pitch)
-                y_top = int(cy - h / 2 = 
+                y_top = int(cy - h / 2)  # Fixed syntax error here
                 y_bot = y_top + h
                 cy = (y_top + y_bot) / 2 + roi_offset[1]
                 torn = True
             else:
                 torn = False
+
 
             # horizontal row near mid-sprocket
             row_y = int((y_top + y_bot) / 2)
