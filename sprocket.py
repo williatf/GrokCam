@@ -61,7 +61,7 @@ class SprocketDetector:
         """
         Profile-based sprocket detection (damage-tolerant).
         - Ignores half-visible sprockets at top/bottom edges.
-        - If sprocket height looks torn (too tall), reconstruct using expected_pitch.
+        - If sprocket AR is out of range, reconstruct using expected aspect ratio.
         - Uses row profiles to measure width near sprocket midline.
         """
         H, W = roi.shape[:2]
@@ -94,17 +94,6 @@ class SprocketDetector:
             h = y_bot - y_top
             cy = (y_top + y_bot) / 2 + roi_offset[1]
 
-            # If too tall (likely torn), reconstruct height from expected_pitch
-            if self.expected_pitch and h > self.expected_pitch * 1.5:
-                h = int(self.expected_pitch)
-                y_top = int(cy - h / 2)  # Fixed syntax error here
-                y_bot = y_top + h
-                cy = (y_top + y_bot) / 2 + roi_offset[1]
-                torn = True
-            else:
-                torn = False
-
-
             # horizontal row near mid-sprocket
             row_y = int((y_top + y_bot) / 2)
             row = gray[row_y, :]
@@ -124,12 +113,22 @@ class SprocketDetector:
             cx = (x_left + x_right) / 2 + roi_offset[0]
             area = w * h
 
-            # aspect ratio check (damage-tolerant if we had to reconstruct height)
+            # aspect ratio check
             ar = w / h if h > 0 else 0
+            torn = False
+
+            if (ar < self.ar_min or ar > self.ar_max) and self.expected_ar:
+                # Recalculate height using expected aspect ratio
+                h_corr = int(round(w / self.expected_ar))
+                y_bot = y_top + h_corr
+                cy = (y_top + y_bot) / 2 + roi_offset[1]
+                h = h_corr
+                area = w * h
+                torn = True
+
+            # Accept if corrected or valid
             if torn:
-                # Check if the reconstructed height is within acceptable limits
-                if h <= self.expected_pitch * 1.5:  # Keep within a reasonable height
-                    sprockets.append((cx, cy, w, h, area))
+                sprockets.append((cx, cy, w, h, area))
             else:
                 if self.ar_min <= ar <= self.ar_max:
                     sprockets.append((cx, cy, w, h, area))
@@ -144,6 +143,12 @@ class SprocketDetector:
             widths = [s[2] for s in sprockets]
             self.expected_width = int(np.median(widths))
             print(f"[SPROCKET] Calibrated expected_width={self.expected_width}px")
+
+        if self.expected_ar is None and len(sprockets) >= 1:
+            ars = [s[2] / s[3] for s in sprockets if s[3] > 0]
+            if ars:
+                self.expected_ar = float(np.median(ars))
+                print(f"[SPROCKET] Calibrated expected_ar={self.expected_ar:.3f}")
 
         # Debug
         if debug_prefix is not None:
