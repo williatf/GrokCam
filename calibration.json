@@ -1,0 +1,29 @@
+{
+  "exposure_time": 814,
+  "gain": 1.0,
+  "sprocket_pitch_px": 795.5,
+  "steps_per_pitch_runs": [
+    280.0,
+    287.0,
+    281.0,
+    283.0,
+    270.0,
+    271.0,
+    279.0,
+    281.0
+  ],
+  "steps_per_pitch_filtered": [
+    280.0,
+    281.0,
+    283.0,
+    279.0,
+    281.0
+  ],
+  "steps_per_pitch_avg": 281,
+  "frame_crop_offsets": null,
+  "frame_crop_ref": "sprocket_center_in_full_frame",
+  "calibration_resolution": [
+    2028,
+    1520
+  ]
+}
