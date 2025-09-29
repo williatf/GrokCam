@@ -1,0 +1,26 @@
+name: Deploy to Raspberry Pi
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.PI_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan ${{ secrets.PI_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Deploy code
+        run: |
+          ssh -i ~/.ssh/id_ed25519 ${{ secrets.PI_USER }}@${{ secrets.PI_HOST }} "cd ${{ secrets.PI_DIR }} && git pull --ff-only"
+
+      - name: Restart service (optional)
+        if: ${{ secrets.SERVICE_NAME != '' }}
+        run: |
+          ssh -i ~/.ssh/id_ed25519 ${{ secrets.PI_USER }}@${{ secrets.PI_HOST }} "sudo systemctl restart ${{ secrets.SERVICE_NAME }}"
