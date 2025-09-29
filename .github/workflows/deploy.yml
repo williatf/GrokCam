@@ -14,14 +14,17 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.PI_KEY }}" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
-          ssh-keyscan ${{ secrets.PI_HOST }} >> ~/.ssh/known_hosts
+          # use port 2206 when scanning host key
+          ssh-keyscan -p 2206 ${{ secrets.PI_HOST }} >> ~/.ssh/known_hosts
 
       - name: Deploy code
         run: |
           ssh -i ~/.ssh/id_ed25519 -p 2206 ${{ secrets.PI_USER }}@${{ secrets.PI_HOST }} "cd ${{ secrets.PI_DIR }} && git pull --ff-only"
 
       - name: Restart service (optional)
+        env:
+          SERVICE_NAME: ${{ secrets.SERVICE_NAME }}
         run: |
-          if [ -n "${{ secrets.SERVICE_NAME }}" ]; then
-            ssh -i ~/.ssh/id_ed25519 ${{ secrets.PI_USER }}@${{ secrets.PI_HOST }} "sudo systemctl restart ${{ secrets.SERVICE_NAME }}"
+          if [ -n "$SERVICE_NAME" ]; then
+            ssh -i ~/.ssh/id_ed25519 -p 2206 ${{ secrets.PI_USER }}@${{ secrets.PI_HOST }} "sudo systemctl restart $SERVICE_NAME"
           fi
