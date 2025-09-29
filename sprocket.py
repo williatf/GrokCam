@@ -127,8 +127,9 @@ class SprocketDetector:
             # aspect ratio check (damage-tolerant if we had to reconstruct height)
             ar = w / h if h > 0 else 0
             if torn:
-                # Skip AR check since we reconstructed
-                sprockets.append((cx, cy, w, h, area))
+                # Check if the reconstructed height is within acceptable limits
+                if h <= self.expected_pitch * 1.5:  # Keep within a reasonable height
+                    sprockets.append((cx, cy, w, h, area))
             else:
                 if self.ar_min <= ar <= self.ar_max:
                     sprockets.append((cx, cy, w, h, area))
