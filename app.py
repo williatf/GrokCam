@@ -45,14 +45,17 @@ def crop_film_frame(frame, anchor, pitch_px=None):
 
     return rotated
 
-def encode_frame(buffer, frame_num):
-    """Heavy CPU work (base64 + json.dumps) offloaded to threadpool"""
-    img_data = buffer.read()
-    img_base64 = base64.b64encode(img_data).decode("utf-8")
+async def encode_frame_async(frame_cropped, frame_num):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, encode_frame, frame_cropped, frame_num)
+
+def encode_frame(frame_cropped, frame_num):
+    _, encoded = cv2.imencode('.jpg', frame_cropped, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+    img_base64 = base64.b64encode(encoded).decode('utf-8')
     return json.dumps({
-        "event": "new_image",
-        "frame": frame_num,
-        "image": img_base64
+        'event': 'new_image',
+        'frame': frame_num,
+        'image': img_base64
     })
 
 # --- Load calibration + config ---
@@ -260,14 +263,9 @@ async def handle_client(websocket):
                 )
 
                 # Re-encode cropped frame to JPEG
-                _, encoded = cv2.imencode('.jpg', frame_cropped, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
-                img_base64 = base64.b64encode(encoded).decode('utf-8')
+                msg = await encode_frame_async(frame_cropped, frame)
+                await websocket.send(msg)
 
-                await websocket.send(json.dumps({
-                    'event': 'new_image',
-                    'frame': frame,
-                    'image': img_base64
-                }))
 
                 print(f"[APP] Sent frame {frame}")
 
