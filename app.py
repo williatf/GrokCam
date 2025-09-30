@@ -281,7 +281,7 @@ async def handle_client(websocket):
             }))
             continue
 
-        if data.get('event') == 'jog_forward' or data.get('event') == 'jog_back'
+        if data.get('event') == 'jog_forward' or data.get('event') == 'jog_back':
             frames = int(data.get("frames", 1))
             direction = 1 if data.get('event') == "jog_forward" else -1
 
