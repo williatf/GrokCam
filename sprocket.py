@@ -4,7 +4,7 @@ import numpy as np
 class SprocketDetector:
     def __init__(self, side="left", auto_roi=0.25,
                  min_area=3000, max_area=6000,
-                 ar_min=1.0, ar_max=2.0,
+                 ar_min=1.2, ar_max=1.6,
                  solidity_min=0.3, edge_margin_frac=1.0,
                  blur=5, open_k=7, close_k=3,
                  adaptive_block=51, adaptive_C=5,
