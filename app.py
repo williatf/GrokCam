@@ -41,6 +41,14 @@ def crop_film_frame(frame, anchor, pitch_px=None):
 
     cropped = frame[y1:y2, 0:W]
 
+    # translate cy into cropped coordinates
+    cy_local = cy - y1
+    cx_local = cx  # x doesn’t shift because we keep full width
+
+    # draw a marker on cy
+    cv2.circle(cropped, (cx_local, cy_local), 8, (0, 0, 255), -1)
+    cv2.line(cropped, (0, cy_local), (W, cy_local), (0, 0, 255), 2)
+
     # 🔄 Rotate 180° (flip vertically + horizontally)
     rotated = cv2.rotate(cropped, cv2.ROTATE_180)
 
