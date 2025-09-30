@@ -161,7 +161,7 @@ last_error = 0 # difference between actual and target for sprocket detection
 
 async def advance_to_next_perforation(camera, websocket, step_chunk=None):
     if step_chunk is None:
-        step_chunk = steps_per_pitch // 4  # 25% pitch
+        step_chunk = steps_per_pitch // 2  # 50% pitch
 
     tracked_cy = None
 
