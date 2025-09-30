@@ -12,22 +12,30 @@ from sprocket import SprocketDetector
 import socket
 import os
 
-def crop_film_frame(frame, anchor, film_frame_crop):
-    """Crop the film frame region relative to sprocket anchor (cx, cy)."""
-    if not film_frame_crop or not anchor:
-        return frame  # fallback to full frame
+def crop_film_frame(frame, anchor, pitch_px=SPROCKET_PITCH_PX):
+    """
+    Crop relative to sprocket anchor:
+    - Full width
+    - Height = 120% of sprocket pitch
+    - Anchor sits 10% from the top
+    """
+    if anchor is None or pitch_px is None:
+        return frame
 
-    cx, cy = int(anchor[0]), int(anchor[1])
-    dx1, dy1, dx2, dy2 = film_frame_crop
-    x1, y1 = cx + dx1, cy + dy1
-    x2, y2 = cx + dx2, cy + dy2
-
-    # Clamp to frame bounds
     H, W = frame.shape[:2]
-    x1, y1 = max(0, x1), max(0, y1)
-    x2, y2 = min(W, x2), min(H, y2)
+    cx, cy = int(anchor[0]), int(anchor[1])
 
-    return frame[y1:y2, x1:x2]
+    crop_h = int(pitch_px * 1.2)
+    offset = int(0.1 * crop_h)
+
+    y1 = max(0, cy - offset)
+    y2 = min(H, y1 + crop_h)
+
+    # If bottom is clipped, shift up
+    if y2 - y1 < crop_h and y1 > 0:
+        y1 = max(0, y2 - crop_h)
+
+    return frame[y1:y2, 0:W]
 
 def encode_frame(buffer, frame_num):
     """Heavy CPU work (base64 + json.dumps) offloaded to threadpool"""
@@ -106,26 +114,6 @@ detector = SprocketDetector(
     adaptive_block=41, adaptive_C=7,
     method="profile"
 )
-
-def apply_dynamic_crop(frame, anchor, pitch_px):
-    """
-    Crop full width and ~120% of the sprocket pitch in height,
-    starting 10% above the sprocket anchor (cy).
-    """
-    if anchor is None or pitch_px is None:
-        return frame  # fallback if no anchor or calibration
-
-    H, W = frame.shape[:2]
-    cx, cy = int(anchor[0]), int(anchor[1])
-
-    crop_h = int(pitch_px * 1.2)      # crop height = 120% pitch
-    offset = int(0.1 * crop_h)        # sprocket sits ~10% from top
-
-    y1 = max(0, cy - offset)
-    y2 = min(H, y1 + crop_h)
-
-    return frame[y1:y2, 0:W]
-
 
 async def advance_to_next_perforation(camera, websocket, steps_per_pitch=STEPS_PER_PITCH, first_frame=False):
     target_y = 246
