@@ -12,6 +12,24 @@ from sprocket import SprocketDetector
 import socket
 import os
 
+def draw_sprockets_debug(frame, sprockets):
+    debug_frame = frame.copy()
+    for (cx, cy, w, h, area) in sprockets:
+        # Draw rectangle
+        x1, y1 = int(cx - w/2), int(cy - h/2)
+        x2, y2 = int(cx + w/2), int(cy + h/2)
+        cv2.rectangle(debug_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+        # Draw center
+        cv2.circle(debug_frame, (int(cx), int(cy)), 6, (0, 0, 255), -1)
+
+        # Label coordinates
+        cv2.putText(debug_frame, f"cy={cy:.1f}",
+                    (int(cx) + 10, int(cy)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5, (255, 0, 0), 1)
+    return debug_frame
+
 def crop_film_frame(frame, anchor, pitch_px=None):
     """
     Crop relative to sprocket anchor:
@@ -221,13 +239,21 @@ async def handle_client(websocket):
                     cv2.IMREAD_COLOR
                 )
 
+                # --- debug ---
+                # Detect sprockets
+                sprockets = detector.detect(frame_bgr, mode="profile")
+
+                # Draw debug overlays
+                debug_frame = draw_sprockets_debug(frame_bgr, sprockets if sprockets else [])
+
                 # Crop actual film frame relative to sprocket anchor
                 frame_cropped = crop_film_frame(
                     frame_bgr, anchor, SPROCKET_PITCH_PX
                 )
 
                 # Re-encode cropped frame to JPEG
-                header, jpg_bytes = await encode_frame_async(frame_cropped, frame)
+                #header, jpg_bytes = await encode_frame_async(frame_cropped, frame)
+                header, jpg_bytes = await encode_frame_async(debug_frame, frame)
                 await websocket.send(header)
                 await websocket.send(jpg_bytes)
 
