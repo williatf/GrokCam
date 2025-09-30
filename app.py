@@ -128,6 +128,8 @@ detector = SprocketDetector(
     method="profile"
 )
 
+last_error = 0 # difference between actual and target for sprocket detection
+
 async def advance_to_next_perforation(
     camera,
     websocket,
@@ -147,8 +149,10 @@ async def advance_to_next_perforation(
         await asyncio.sleep(0.05)
     else:
         # try a coarse move by one pitch
-        tc.steps_forward(steps_per_pitch)
-        steps_taken += steps_per_pitch
+        coarse_steps = steps_per_pitch + int(last_error * steps_per_px)
+        coarse_steps = max(steps_per_pitch // 2, min(steps_per_pitch * 2, coarse_steps))
+        tc.steps_forward(coarse_steps)
+        steps_taken += coarse_steps
         await asyncio.sleep(0.05)
 
     # --- Fine alignment loop ---
