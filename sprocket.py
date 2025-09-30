@@ -82,20 +82,21 @@ class SprocketDetector:
             bands = np.split(mask_y, splits)
 
         # Guard band: ignore sprockets too close to edges
-        margin = int(0.02 * H)
+        top_guard = int(0.005 * H)       # top 0.5% of frame
+        bottom_guard = int(H * (1.0 - 0.005))  # bottom 0.5% of frame
 
-        print(f"[DEBUG] Found {len(bands)} candidate bands")
         for band in bands:
             if len(band) < 5:
                 continue
-
             y_top, y_bot = band[0], band[-1]
 
-            # Reject partial sprockets at the very top or bottom of the frame
-            if y_top <= 2 or y_bot >= H - 2:   # within 2px of edges
-                # Optional: debug log
+            # Reject partial sprockets at edges
+            if y_top <= top_guard or y_bot >= bottom_guard:
                 print(f"[DEBUG] Rejecting partial band at edges: y_range={y_top}-{y_bot}")
                 continue
+
+            # ... continue with bounding box, width/height, aspect ratio checks
+
 
             print(f"  y_range: {band[0]}–{band[-1]}, size={len(band)}")
 
