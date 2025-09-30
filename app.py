@@ -186,16 +186,37 @@ async def advance_to_next_perforation(
             return (cx, cy)
 
         # adjust forward only (never backward)
-        if abs(error) > tolerance and error > 0:
+        if error > 0:
+            # sprocket above target → nudge forward into place
             correction = int(error * steps_per_px)
             correction = max(2, min(correction, 20))
             tc.steps_forward(correction)
             steps_taken += correction
             await asyncio.sleep(0.01)
+        elif cy > target_y + tolerance:
+            # sprocket BELOW target too much → probably missed the new one
+            print(f"[APP] Sprocket below target at cy={cy}, likely slippage. Advancing...")
+            for _ in range(3):  # try a few nudges
+                tc.steps_forward(steps_per_pitch // 2)
+                steps_taken += steps_per_pitch // 2
+                await asyncio.sleep(0.05)
+
+                buffer = io.BytesIO()
+                camera.capture_file(buffer, format='jpeg')
+                lores_bgr = cv2.imdecode(np.frombuffer(buffer.getvalue(), np.uint8), cv2.IMREAD_COLOR)
+                sprockets = detector.detect(lores_bgr, mode="profile")
+                if not sprockets:
+                    continue
+
+                sprockets.sort(key=lambda s: s[1])
+                cx, cy, w, h, area = sprockets[0]
+                if cy <= target_y + tolerance:
+                    break  # found a proper sprocket near target
+            return (cx, cy)
+
         else:
-            # sprocket already past target → accept frame as-is
+            # sprocket just past target → accept frame as-is
             print(f"[APP] Sprocket past target at cy={cy}, accepting.")
-            last_error = error
             return (cx, cy)
 
     print("[APP] Alignment failed (max steps reached)")
