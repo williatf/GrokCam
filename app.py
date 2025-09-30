@@ -75,7 +75,7 @@ def crop_film_frame(frame, anchor, pitch_px=None):
     # 🔄 Rotate 180° (flip vertically + horizontally)
     flipped = cv2.flip(cropped, 0)
 
-    return rotated
+    return flipped
 
 async def encode_frame_async(frame_cropped, frame_num):
     loop = asyncio.get_running_loop()
