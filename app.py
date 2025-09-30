@@ -137,8 +137,20 @@ async def advance_to_next_perforation(
     max_steps = 2000
     steps_taken = 0
 
+    # --- Coarse advance ---
+    if first_frame:
+        # always move at least one pitch on the first frame
+        tc.steps_forward(steps_per_pitch)
+        steps_taken += steps_per_pitch
+        await asyncio.sleep(0.05)
+    else:
+        # try a coarse move by one pitch
+        tc.steps_forward(steps_per_pitch)
+        steps_taken += steps_per_pitch
+        await asyncio.sleep(0.05)
+
+    # --- Fine alignment loop ---
     while steps_taken < max_steps:
-        # --- capture frame ---
         buffer = io.BytesIO()
         camera.capture_file(buffer, format='jpeg')
         lores_bgr = cv2.imdecode(
@@ -148,52 +160,35 @@ async def advance_to_next_perforation(
 
         sprockets = detector.detect(lores_bgr, mode="profile")
         if not sprockets:
-            if first_frame:
-                # jump a whole pitch and retry
-                tc.steps_forward(steps_per_pitch)
-                steps_taken += steps_per_pitch
-                await asyncio.sleep(0.05)
-                continue
-            else:
-                # nudge when not first frame
-                tc.steps_forward(20)
-                steps_taken += 20
-                await websocket.send(json.dumps({
-                    'event': 'warning',
-                    'message': f'No sprocket detected at step {steps_taken}'
-                }))
-                continue
+            tc.steps_forward(20)
+            steps_taken += 20
+            await websocket.send(json.dumps({
+                'event': 'warning',
+                'message': f'No sprocket detected at step {steps_taken}'
+            }))
+            continue
 
         # pick the top sprocket
         sprockets.sort(key=lambda s: s[1])
         cx, cy, w, h, area = sprockets[0]
-        print(f"[APP] Top sprocket at (cx={cx}, cy={cy})")
-
         error = target_y - cy
+        print(f"[APP] Top sprocket cy={cy}, error={error}, steps_taken={steps_taken}")
 
         if abs(error) < tolerance:
-            print(f"[APP] Alignment success: cy={cy}")
+            print(f"[APP] Alignment success at cy={cy}")
             return (cx, cy)
 
+        # adjust forward only (never backward)
         if error > 0:
-            # sprocket above target → step forward
             correction = int(error * steps_per_px)
             correction = max(2, min(correction, 20))
             tc.steps_forward(correction)
             steps_taken += correction
             await asyncio.sleep(0.01)
         else:
-            if first_frame:
-                # if first frame and sprocket already past target, force one pitch forward
-                print(f"[APP] First frame sprocket past target, advancing one pitch")
-                tc.steps_forward(steps_per_pitch)
-                steps_taken += steps_per_pitch
-                await asyncio.sleep(0.05)
-                first_frame = False  # only do this once
-            else:
-                # on later frames, just accept
-                print(f"[APP] Sprocket passed target (cy={cy}), accepting frame.")
-                return (cx, cy)
+            # sprocket already past target → accept frame as-is
+            print(f"[APP] Sprocket past target at cy={cy}, accepting.")
+            return (cx, cy)
 
     print("[APP] Alignment failed (max steps reached)")
     return None
