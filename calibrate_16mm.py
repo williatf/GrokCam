@@ -31,7 +31,7 @@ def show_debug(frame, sprockets, title="calib"):
         y2 = int(round(cy + h / 2))
         cv2.rectangle(dbg, (x1, y1), (x2, y2), (0, 255, 0), 2)
         cv2.circle(dbg, (int(round(cx)), int(round(cy))), 3, (0, 0, 255), -1)
-    dbg_small = cv2.resize(dbg,(640,480))
+    dbg_small = cv2.resize(dbg,(1280,960))
     cv2.imshow(title, dbg_small)
     cv2.waitKey(1)
 
@@ -64,80 +64,77 @@ def auto_calibrate_exposure(camera, target_p99=240, max_iter=10):
 
     return last_frame, exposure, gain
 
+def ensure_two_sprockets(camera, tc, detector, step_chunk=STEP_CHUNK, max_steps=MAX_STEPS_SEARCH):
+    steps = 0
+    while steps <= max_steps:
+        req = camera.capture_request()
+        frame = req.make_array("main")
+        req.release()
+        sprockets = detector.detect(frame, mode="profile")
+        if len(sprockets) >= 2:
+            return frame, sprockets, steps
+        tc.steps_forward(step_chunk)
+        steps += step_chunk
+        time.sleep(0.02)
+    return None, [], steps
+
 # -------------------- Measure steps-per-pixel by tracking one sprocket --------------------
-def measure_steps_per_pixel(camera, tc, detector, step_chunk=STEP_CHUNK, max_steps=MAX_STEPS_TRACK):
+def measure_steps_per_pitch(camera, tc, detector, step_chunk=STEP_CHUNK, max_steps=MAX_STEPS_TRACK):
     """
-    Track a single sprocket centroid from its starting location until
-    its bottom edge is close to the frame bottom.
-    Returns steps_per_pixel (float) or None.
+    Assumes two sprockets are visible.
+    Measures:
+      - pitch_px: vertical spacing between them
+      - steps_per_px: by tracking one sprocket down until near bottom
+    Returns (pitch_px, steps_per_px) or (None, None).
     """
-    # capture start
     req = camera.capture_request()
     frame = req.make_array("main")
     req.release()
 
     spro = detector.detect(frame, mode="profile")
-    if not spro:
-        print("[CALIB] No sprockets detected to start tracking.")
-        return None
+    if len(spro) < 2:
+        print("[CALIB] Need at least 2 sprockets to measure.")
+        return None, None
 
-    # Pick the top-most sprocket as anchor
-    anchor = min(spro, key=lambda s: s[1])
-    cx, cy, w, h, _ = anchor
+    spro_sorted = sorted(spro, key=lambda s: s[1])
+    pitch_px = spro_sorted[1][1] - spro_sorted[0][1]
+    print(f"[CALIB] pitch_px={pitch_px:.1f}")
+
+    # Track the top sprocket down
+    cx, cy, w, h, _ = spro_sorted[0]
     cy_start = cy
-    h_anchor = h
-
     H = frame.shape[0]
     bottom_stop = H * (1.0 - BOTTOM_MARGIN_FRAC)
-
     steps_total = 0
-    last_debug = 0
 
-    print(f"[TRACK] Start sprocket at cy={cy_start:.1f}, h={h_anchor:.1f}, bottom_stop={bottom_stop:.1f}")
-
-    while steps_total <= max_steps:
-        # move transport
+    while steps_total < max_steps:
         tc.steps_forward(step_chunk)
         steps_total += step_chunk
         time.sleep(0.02)
 
-        # capture new frame
         req = camera.capture_request()
         frame = req.make_array("main")
         req.release()
-
         spro_after = detector.detect(frame, mode="profile")
         if not spro_after:
-            print("[TRACK] Lost sprocket—stop.")
             break
 
-        # Find the sprocket closest to original anchor x position
-        # (helps avoid accidentally jumping to a neighbor sprocket)
         sprocket = min(spro_after, key=lambda s: abs(s[0] - cx))
-        cx_new, cy_new, w_new, h_new, _ = sprocket
-
-        if steps_total - last_debug >= 50:
-            show_debug(frame, [sprocket], title="TrackAnchor")
-            last_debug = steps_total
-
-        print(f"[TRACK] cy: {cy:.1f} -> {cy_new:.1f} (+{cy_new - cy:.1f}px) at steps {steps_total}")
+        cx_new, cy_new, _, h_new, _ = sprocket
         cy = cy_new
-        h_anchor = h_new
 
-        # Stop when bottom of sprocket approaches bottom margin
-        sprocket_bottom = cy + h_anchor / 2
+        sprocket_bottom = cy + h_new/2
         if sprocket_bottom >= bottom_stop:
-            print(f"[TRACK] Sprocket bottom reached {sprocket_bottom:.1f}, near frame bottom—stop.")
             break
 
     delta_y = cy - cy_start
-    if delta_y <= 0 or steps_total <= 0:
-        print(f"[TRACK] Invalid track (Δy={delta_y}, steps={steps_total}).")
-        return None
+    if delta_y <= 0:
+        print("[CALIB] Invalid sprocket track.")
+        return pitch_px, None
 
-    spp = steps_total / delta_y
-    print(f"[TRACK] Δy={delta_y:.1f}px, steps={steps_total} → steps/px={spp:.4f}")
-    return spp
+    steps_per_px = steps_total / delta_y
+    print(f"[CALIB] steps_total={steps_total}, Δy={delta_y:.1f}px → steps/px={steps_per_px:.4f}")
+    return pitch_px, steps_per_px
 
 # -------------------- Outlier filter --------------------
 def reject_outliers(arr, m=2.5):
@@ -212,70 +209,6 @@ def select_relative_crop(img, anchor_xy, win_name="Select Film Frame"):
             print("[CROP] Skipped.")
             return None
 
-def self_scan_pitch(camera, tc, detector, step_size=10, max_steps=2000):
-    """
-    Measure sprocket pitch by:
-    1. Detect top sprocket (anchor_start).
-    2. Wait for a new sprocket to appear above anchor_start.
-    3. Track that new sprocket until it crosses anchor_start's original position.
-    4. Return steps taken = steps per pitch.
-    """
-    print("[CALIB] Starting simplified self-scan pitch measurement...")
-
-    # Step 1: find initial anchor sprocket (top-most)
-    request = camera.capture_request()
-    frame = request.make_array("main")
-    request.release()
-    sprockets = detector.detect(frame, mode="profile")
-    if not sprockets:
-        print("[CALIB] No sprocket detected to start self-scan.")
-        return None
-
-    anchor_start = min(sprockets, key=lambda s: s[1])
-    y_start = anchor_start[1]
-    print(f"[CALIB] Initial sprocket anchor at y={y_start:.1f}")
-
-    steps_taken = 0
-    new_sprocket_seen = False
-    y_new = None
-
-    while steps_taken < max_steps:
-        # Advance transport
-        tc.steps_forward(step_size)
-        steps_taken += step_size
-        time.sleep(0.05)
-
-        # Grab new frame
-        request = camera.capture_request()
-        frame = request.make_array("main")
-        request.release()
-        sprockets = detector.detect(frame, mode="profile")
-        if not sprockets:
-            continue
-
-        # Step 2: look for new sprocket ABOVE y_start
-        if not new_sprocket_seen:
-            top_sprocket = min(sprockets, key=lambda s: s[1])
-            if top_sprocket[1] < y_start:
-                new_sprocket_seen = True
-                y_new = top_sprocket[1]
-                steps_at_new = steps_taken
-                print(f"[CALIB] New sprocket appeared at y={y_new:.1f} after {steps_at_new} steps")
-
-        # Step 3: once new sprocket is seen, track until it crosses y_start
-        if new_sprocket_seen:
-            # find that sprocket again (closest to previous y_new)
-            sprocket = min(sprockets, key=lambda s: abs(s[1] - y_new))
-            y_new = sprocket[1]
-            if y_new >= y_start:
-                print(f"[CALIB] New sprocket crossed y_start={y_start:.1f} at y={y_new:.1f}")
-                print(f"[CALIB] Steps per pitch = {steps_taken - steps_at_new}")
-                return steps_taken - steps_at_new
-
-    print("[CALIB] Self-scan failed (no crossing detected).")
-    return None
-
-
 # -------------------- Main --------------------
 def main():
     print("LED on")
@@ -288,12 +221,11 @@ def main():
     camera.start()
     time.sleep(1)
 
-    # Auto exposure on *full frame*
+    # Auto exposure
     full_frame, exp, gain = auto_calibrate_exposure(camera)
 
-    # Detector tuned for full frame, left strip
     detector = SprocketDetector(
-        side="left", auto_roi=0.40,   # search 40% strip at left
+        side="left", auto_roi=0.40,
         min_area=1500, max_area=25000,
         ar_min=1.2, ar_max=1.8,
         solidity_min=0.75,
@@ -302,73 +234,48 @@ def main():
         method="profile"
     )
 
-    # Estimate pitch_px using self-scan (single sprocket)
-    pitch_px = self_scan_pitch(camera, tc, detector)
-    if pitch_px:
-        print(f"[CALIB] pitch_px estimate from self-scan: {pitch_px:.1f}")
-    else:
-        pitch_px = 300.0
-        print(f"[CALIB] Using fallback pitch_px={pitch_px:.1f}")
-
-    detector.update_pitch(pitch_px)
-
-
-    # Multi-run measure steps/pitch via steps/px * pitch_px
     runs = 8
-    steps_per_pitch_runs = []
+    pitch_vals, steps_per_pitch_vals = [], []
     for run in range(runs):
         print(f"\n[CALIB] === Run {run+1}/{runs} ===")
-        spp = measure_steps_per_pixel(camera, tc, detector)
-        if spp is not None and pitch_px is not None and pitch_px > 0:
-            sppitch = int(round(spp * pitch_px))
-            print(f"[CALIB] steps/px={spp:.4f}, pitch_px={pitch_px:.1f} → steps/pitch={sppitch}")
-            steps_per_pitch_runs.append(sppitch)
-        else:
-            print("[CALIB] Skipping run; insufficient measurement.")
 
-        # jog randomly between runs (forward only to avoid rewinding issues)
+        # Ensure we have two sprockets
+        frame, spro, _ = ensure_two_sprockets(camera, tc, detector)
+        if not spro or len(spro) < 2:
+            print("[CALIB] Could not find 2 sprockets, skipping run.")
+            continue
+
+        pitch_px, steps_per_px = measure_steps_per_pitch(camera, tc, detector)
+        if pitch_px and steps_per_px:
+            steps_per_pitch = steps_per_px * pitch_px
+            pitch_vals.append(pitch_px)
+            steps_per_pitch_vals.append(steps_per_pitch)
+            print(f"[CALIB] pitch_px={pitch_px:.1f}, steps/px={steps_per_px:.4f} → steps/pitch={steps_per_pitch:.1f}")
+        else:
+            print("[CALIB] Measurement failed.")
+
+        # Jog forward
         offset = random.randint(80, 300)
-        print(f"[CALIB] Jogging forward {offset} steps")
         tc.steps_forward(offset)
         time.sleep(0.3)
 
-    runs_arr = np.array(steps_per_pitch_runs, dtype=float)
-    filtered = reject_outliers(runs_arr)
-    avg_steps = int(round(np.mean(filtered))) if len(filtered) else None
+    # Filter and average
+    pitch_vals = np.array(pitch_vals, dtype=float)
+    steps_per_pitch_vals = np.array(steps_per_pitch_vals, dtype=float)
+    pitch_filtered = reject_outliers(pitch_vals)
+    spp_filtered = reject_outliers(steps_per_pitch_vals)
 
-    print(f"\n[CALIB] Runs: {runs_arr.tolist()}")
-    print(f"[CALIB] Filtered: {filtered.tolist() if len(filtered) else []}")
-    print(f"[CALIB] Final averaged steps_per_pitch={avg_steps}")
+    avg_pitch = np.mean(pitch_filtered) if len(pitch_filtered) else None
+    avg_spp = int(round(np.mean(spp_filtered))) if len(spp_filtered) else None
 
-    # Grab a fresh frame to store a film-frame crop relative to sprocket center (FULL frame reference)
-    req = camera.capture_request()
-    frame_now = req.make_array("main")
-    req.release()
+    print(f"\n[CALIB] Final pitch_px={avg_pitch:.1f}, steps/pitch={avg_spp}")
 
-    spro_now = detector.detect(frame_now, mode="profile")
-    rel_offsets = None
-    if spro_now:
-        H = frame_now.shape[0]
-        # anchor near center vertically (nicer for framing selection)
-        anchor = min(spro_now, key=lambda s: abs(s[1] - H/2))
-        anchor_cx, anchor_cy = float(anchor[0]), float(anchor[1])
-        print(f"[CROP] Anchor sprocket at (cx={anchor_cx:.1f}, cy={anchor_cy:.1f}) in FULL frame.")
-        rel_offsets = select_relative_crop(frame_now, (anchor_cx, anchor_cy), win_name="Select Film Frame")
-    else:
-        print("[CROP] Could not find sprocket for frame-crop selection; skipping.")
-
-    # Save calibration.json
+    # Save calibration.json (simplified)
     calibration_data = {
         "exposure_time": exp,
         "gain": gain,
-        "sprocket_pitch_px": float(pitch_px) if pitch_px is not None else None,
-        "steps_per_pitch_runs": runs_arr.tolist(),
-        "steps_per_pitch_filtered": filtered.tolist() if len(filtered) else [],
-        "steps_per_pitch_avg": avg_steps,
-        # film-frame crop offsets relative to sprocket center in FULL frame
-        "frame_crop_offsets": rel_offsets,
-        "frame_crop_ref": "sprocket_center_in_full_frame",
-        # store which resolution was used for consistency
+        "sprocket_pitch_px": float(avg_pitch) if avg_pitch else None,
+        "steps_per_pitch": avg_spp,
         "calibration_resolution": list(FULL_RES)
     }
     with open("calibration.json", "w") as f:
