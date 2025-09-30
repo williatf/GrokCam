@@ -66,7 +66,8 @@ def auto_calibrate_exposure(camera, target_p99=240, max_iter=10):
 # -------------------- Measure steps-per-pixel by tracking one sprocket --------------------
 def measure_steps_per_pixel(camera, tc, detector, step_chunk=STEP_CHUNK, max_steps=MAX_STEPS_TRACK):
     """
-    Track a single sprocket as it moves down until it leaves (or near bottom).
+    Track a single sprocket centroid from its starting location until
+    its bottom edge is close to the frame bottom.
     Returns steps_per_pixel (float) or None.
     """
     # capture start
@@ -79,10 +80,11 @@ def measure_steps_per_pixel(camera, tc, detector, step_chunk=STEP_CHUNK, max_ste
         print("[CALIB] No sprockets detected to start tracking.")
         return None
 
-    # Pick the *top-most* sprocket as anchor so it has room to travel down
+    # Pick the top-most sprocket as anchor
     anchor = min(spro, key=lambda s: s[1])
-    cy_anchor = anchor[1]
-    cy_start  = cy_anchor
+    cx, cy, w, h, _ = anchor
+    cy_start = cy
+    h_anchor = h
 
     H = frame.shape[0]
     bottom_stop = H * (1.0 - BOTTOM_MARGIN_FRAC)
@@ -90,44 +92,44 @@ def measure_steps_per_pixel(camera, tc, detector, step_chunk=STEP_CHUNK, max_ste
     steps_total = 0
     last_debug = 0
 
-    print(f"[TRACK] Start anchor cy={cy_anchor:.1f}, bottom_stop={bottom_stop:.1f}")
+    print(f"[TRACK] Start sprocket at cy={cy_start:.1f}, h={h_anchor:.1f}, bottom_stop={bottom_stop:.1f}")
 
     while steps_total <= max_steps:
-        # move small chunk
+        # move transport
         tc.steps_forward(step_chunk)
         steps_total += step_chunk
         time.sleep(0.02)
 
+        # capture new frame
         req = camera.capture_request()
         frame = req.make_array("main")
         req.release()
 
         spro_after = detector.detect(frame, mode="profile")
-        if spro_after:
-            if steps_total - last_debug >= 50:
-                show_debug(frame, spro_after, title="TrackOne")
-                last_debug = steps_total
         if not spro_after:
-            print("[TRACK] Lost all sprockets—stop.")
+            print("[TRACK] Lost sprocket—stop.")
             break
 
-        # Find candidate below previous anchor (film moving down)
-        candidates = [s for s in spro_after if s[1] > cy_anchor]
-        if not candidates:
-            print("[TRACK] No candidate below anchor—stop.")
+        # Find the sprocket closest to original anchor x position
+        # (helps avoid accidentally jumping to a neighbor sprocket)
+        sprocket = min(spro_after, key=lambda s: abs(s[0] - cx))
+        cx_new, cy_new, w_new, h_new, _ = sprocket
+
+        if steps_total - last_debug >= 50:
+            show_debug(frame, [sprocket], title="TrackAnchor")
+            last_debug = steps_total
+
+        print(f"[TRACK] cy: {cy:.1f} -> {cy_new:.1f} (+{cy_new - cy:.1f}px) at steps {steps_total}")
+        cy = cy_new
+        h_anchor = h_new
+
+        # Stop when bottom of sprocket approaches bottom margin
+        sprocket_bottom = cy + h_anchor / 2
+        if sprocket_bottom >= bottom_stop:
+            print(f"[TRACK] Sprocket bottom reached {sprocket_bottom:.1f}, near frame bottom—stop.")
             break
 
-        # Choose closest below
-        cy_new = min(candidates, key=lambda s: s[1] - cy_anchor)[1]
-        # update
-        print(f"[TRACK] cy: {cy_anchor:.1f} -> {cy_new:.1f} (+{cy_new - cy_anchor:.1f}px) at steps {steps_total}")
-        cy_anchor = cy_new
-
-        if cy_anchor >= bottom_stop:
-            print("[TRACK] Near bottom of frame—stop.")
-            break
-
-    delta_y = cy_anchor - cy_start
+    delta_y = cy - cy_start
     if delta_y <= 0 or steps_total <= 0:
         print(f"[TRACK] Invalid track (Δy={delta_y}, steps={steps_total}).")
         return None
