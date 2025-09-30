@@ -281,6 +281,38 @@ async def handle_client(websocket):
             }))
             continue
 
+        if data.get('event') == 'jog_forward' or 'jog_back'
+            frames = int(data.get("frames", 1))
+            direction = 1 if data.get('event') == "jog_forward" else -1
+
+            steps_per_pitch = STEPS_PER_PITCH
+            for f in range(frames):
+                if direction > 0:
+                    tc.steps_forward(steps_per_pitch)
+                else:
+                    tc.steps_back(steps_per_pitch)
+                await asyncio.sleep(0.05)
+
+            # Capture image after jogging
+            buffer = io.BytesIO()
+            camera.capture_file(buffer, format='jpeg')
+            frame_bgr = cv2.imdecode(np.frombuffer(buffer.getvalue(), np.uint8), cv2.IMREAD_COLOR)
+
+            # Detect sprockets + crop
+            sprockets = detector.detect(frame_bgr, mode="profile")
+            debug_frame = draw_sprockets_debug(frame_bgr, sprockets if sprockets else [])
+            anchor = sprockets[0] if sprockets else None
+            frame_cropped = crop_film_frame(frame_bgr, anchor, SPROCKET_PITCH_PX)
+
+            # Encode cropped image
+            _, encoded = cv2.imencode(".jpg", frame_cropped, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+            await websocket.send(encoded.tobytes())  # binary send
+
+            await websocket.send(json.dumps({
+                "event": "info",
+                "message": f"Jogged {'forward' if direction>0 else 'back'} {frames} frames"
+            }))
+
 async def main():
     print("Starting WebSocket server on ws://0.0.0.0:5000")
     server = await websockets.serve(
