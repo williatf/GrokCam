@@ -37,6 +37,7 @@ def crop_film_frame(frame, anchor, pitch_px=None):
     # If bottom is clipped, shift up
     if y2 - y1 < crop_h and y1 > 0:
         y1 = max(0, y2 - crop_h)
+        print("[APP] Cropping has moved up since the bottom is clipped.")
 
     cropped = frame[y1:y2, 0:W]
 
