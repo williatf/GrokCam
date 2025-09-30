@@ -71,6 +71,7 @@ def ensure_two_sprockets(camera, tc, detector, step_chunk=STEP_CHUNK, max_steps=
         frame = req.make_array("main")
         req.release()
         sprockets = detector.detect(frame, mode="profile")
+        print(f"[CALIB] Sprockets detected is {len(sprockets)}")
         if len(sprockets) >= 2:
             return frame, sprockets, steps
         tc.steps_forward(step_chunk)
