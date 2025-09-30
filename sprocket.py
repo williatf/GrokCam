@@ -86,7 +86,6 @@ class SprocketDetector:
 
         print(f"[DEBUG] Found {len(bands)} candidate bands")
         for band in bands:
-            print(f"  y_range: {band[0]}–{band[-1]}, size={len(band)}")
             if len(band) < 5:
                 continue
 
@@ -97,6 +96,8 @@ class SprocketDetector:
                 # Optional: debug log
                 print(f"[DEBUG] Rejecting partial band at edges: y_range={y_top}-{y_bot}")
                 continue
+
+            print(f"  y_range: {band[0]}–{band[-1]}, size={len(band)}")
 
             h = y_bot - y_top
             cy = (y_top + y_bot) / 2 + roi_offset[1]
