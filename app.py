@@ -140,6 +140,7 @@ async def advance_to_next_perforation(
     tolerance = 30
     max_steps = 2000
     steps_taken = 0
+    global last_error
 
     # --- Coarse advance ---
     if first_frame:
