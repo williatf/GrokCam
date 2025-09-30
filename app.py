@@ -67,7 +67,7 @@ gain = settings.get("gain", 1.0)
 if not pitch_px or not steps_per_pitch or not calib_res or not exposure_time or gain is None:
     raise RuntimeError("Calibration data missing. Please run calibrate_16mm.py first.")
 
-global steps_per_px = steps_per_pitch / pitch_px
+steps_per_px = steps_per_pitch / pitch_px
 
 SPROCKET_PITCH_PX = pitch_px
 STEPS_PER_PITCH = steps_per_pitch
