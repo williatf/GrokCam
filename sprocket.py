@@ -89,8 +89,13 @@ class SprocketDetector:
             print(f"  y_range: {band[0]}–{band[-1]}, size={len(band)}")
             if len(band) < 5:
                 continue
+
             y_top, y_bot = band[0], band[-1]
-            if y_top < margin or y_bot > H - margin:
+
+            # Reject partial sprockets at the very top or bottom of the frame
+            if y_top <= 2 or y_bot >= H - 2:   # within 2px of edges
+                # Optional: debug log
+                print(f"[DEBUG] Rejecting partial band at edges: y_range={y_top}-{y_bot}")
                 continue
 
             h = y_bot - y_top
