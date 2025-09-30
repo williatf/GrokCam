@@ -130,97 +130,42 @@ detector = SprocketDetector(
 
 last_error = 0 # difference between actual and target for sprocket detection
 
-async def advance_to_next_perforation(
-    camera,
-    websocket,
-    steps_per_pitch=STEPS_PER_PITCH,
-    first_frame=False
-):
-    target_y = 246
-    tolerance = 30
-    max_steps = 2000
-    steps_taken = 0
-    global last_error
+async def advance_to_next_perforation(camera, websocket, step_chunk=None):
+    if step_chunk is None:
+        step_chunk = steps_per_pitch // 2  # coarse stepping (50% pitch)
 
-    # --- Coarse advance ---
-    if first_frame:
-        # always move at least one pitch on the first frame
-        tc.steps_forward(steps_per_pitch)
-        steps_taken += steps_per_pitch
-        await asyncio.sleep(0.05)
-    else:
-        # try a coarse move by one pitch
-        coarse_steps = steps_per_pitch + int(0.5 * last_error * steps_per_px)
-        coarse_steps = max(steps_per_pitch // 2, min(steps_per_pitch * 2, coarse_steps))
-        tc.steps_forward(coarse_steps)
-        steps_taken += coarse_steps
-        await asyncio.sleep(0.05)
+    tracked_cy = None
 
-    # --- Fine alignment loop ---
-    while steps_taken < max_steps:
+    while True:
+        # Capture + detect sprockets
         buffer = io.BytesIO()
         camera.capture_file(buffer, format='jpeg')
         lores_bgr = cv2.imdecode(
-            np.frombuffer(buffer.getvalue(), dtype=np.uint8),
+            np.frombuffer(buffer.getvalue(), np.uint8),
             cv2.IMREAD_COLOR
         )
-
         sprockets = detector.detect(lores_bgr, mode="profile")
+
         if not sprockets:
-            tc.steps_forward(20)
-            steps_taken += 20
-            await websocket.send(json.dumps({
-                'event': 'warning',
-                'message': f'No sprocket detected at step {steps_taken}'
-            }))
+            tc.steps_forward(step_chunk)
+            await asyncio.sleep(0.01)
             continue
 
-        # pick the top sprocket
         sprockets.sort(key=lambda s: s[1])
-        cx, cy, w, h, area = sprockets[0]
-        error = target_y - cy
-        print(f"[APP] Top sprocket cy={cy}, error={error}, steps_taken={steps_taken}")
+        top = sprockets[0]
+        cx, cy, *_ = top
 
-        if abs(error) < tolerance:
-            print(f"[APP] Alignment success at cy={cy}")
+        if tracked_cy is None:
+            # First sprocket, just start tracking
+            tracked_cy = cy
+
+        elif cy < tracked_cy - 5:  # new sprocket appeared above
+            print(f"[APP] New sprocket at cy={cy:.1f}, using as anchor")
             return (cx, cy)
 
-        # adjust forward only (never backward)
-        if error > 0:
-            # sprocket above target → nudge forward into place
-            correction = int(error * steps_per_px)
-            correction = max(2, min(correction, 20))
-            tc.steps_forward(correction)
-            steps_taken += correction
-            await asyncio.sleep(0.01)
-        elif cy > target_y + tolerance:
-            # sprocket BELOW target too much → probably missed the new one
-            print(f"[APP] Sprocket below target at cy={cy}, likely slippage. Advancing...")
-            for _ in range(3):  # try a few nudges
-                tc.steps_forward(steps_per_pitch // 2)
-                steps_taken += steps_per_pitch // 2
-                await asyncio.sleep(0.05)
-
-                buffer = io.BytesIO()
-                camera.capture_file(buffer, format='jpeg')
-                lores_bgr = cv2.imdecode(np.frombuffer(buffer.getvalue(), np.uint8), cv2.IMREAD_COLOR)
-                sprockets = detector.detect(lores_bgr, mode="profile")
-                if not sprockets:
-                    continue
-
-                sprockets.sort(key=lambda s: s[1])
-                cx, cy, w, h, area = sprockets[0]
-                if cy <= target_y + tolerance:
-                    break  # found a proper sprocket near target
-            return (cx, cy)
-
-        else:
-            # sprocket just past target → accept frame as-is
-            print(f"[APP] Sprocket past target at cy={cy}, accepting.")
-            return (cx, cy)
-
-    print("[APP] Alignment failed (max steps reached)")
-    return None
+        # Keep stepping forward until a new sprocket shows
+        tc.steps_forward(step_chunk)
+        await asyncio.sleep(0.01)
 
 async def handle_client(websocket):
     print("Client connected")
@@ -239,9 +184,7 @@ async def handle_client(websocket):
             for frame in range(num_frames):
                 if stop_requested:
                     break
-                anchor = await advance_to_next_perforation(
-                    camera, websocket, first_frame=(frame == 0)
-                )
+                anchor = await advance_to_next_perforation(camera, websocket)
                 if not anchor:
                     await websocket.send(json.dumps({
                         'event': 'error',
@@ -253,6 +196,7 @@ async def handle_client(websocket):
                 buffer = io.BytesIO()
                 camera.capture_file(buffer, format='jpeg')
                 buffer.seek(0)
+
                 frame_bgr = cv2.imdecode(
                     np.frombuffer(buffer.getvalue(), np.uint8),
                     cv2.IMREAD_COLOR
@@ -260,7 +204,7 @@ async def handle_client(websocket):
 
                 # Crop actual film frame relative to sprocket anchor
                 frame_cropped = crop_film_frame(
-                    frame_bgr, anchor, settings.get("frame_crop_offsets")
+                    frame_bgr, anchor, SPROCKET_PITCH_PX)
                 )
 
                 # Re-encode cropped frame to JPEG
