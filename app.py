@@ -38,7 +38,12 @@ def crop_film_frame(frame, anchor, pitch_px=None):
     if y2 - y1 < crop_h and y1 > 0:
         y1 = max(0, y2 - crop_h)
 
-    return frame[y1:y2, 0:W]
+    cropped = frame[y1:y2, 0:W]
+
+    # 🔄 Rotate 180° (flip vertically + horizontally)
+    rotated = cv2.rotate(cropped, cv2.ROTATE_180)
+
+    return rotated
 
 def encode_frame(buffer, frame_num):
     """Heavy CPU work (base64 + json.dumps) offloaded to threadpool"""
