@@ -16,7 +16,7 @@ FULL_RES = (2028, 1520)  # full FoV bin2 for HQ cam. Use (4056, 3040) for full n
 STEP_CHUNK = 10          # small movement for searching/tracking
 MAX_STEPS_SEARCH = 2000  # cap during search for two sprockets
 MAX_STEPS_TRACK  = 2000  # cap during single-sprocket tracking
-BOTTOM_MARGIN_FRAC = 0.06  # stop tracking when anchor gets within ~6% of bottom
+BOTTOM_MARGIN_FRAC = 0.12  # stop tracking when anchor gets within ~12% of bottom
 
 CONFIG_FILE = "config.json"
 
@@ -62,31 +62,6 @@ def auto_calibrate_exposure(camera, target_p99=240, max_iter=10):
         time.sleep(0.2)
 
     return last_frame, exposure, gain
-
-# -------------------- Ensure two sprockets visible --------------------
-def ensure_two_sprockets(camera, tc, detector, step_chunk=STEP_CHUNK, max_steps=MAX_STEPS_SEARCH):
-    """
-    Move forward in small increments until we see >= 2 sprockets.
-    Returns (frame, sprockets, steps_moved). If never found, returns (frame, sprockets_or_empty, steps).
-    """
-    steps = 0
-    while steps <= max_steps:
-        req = camera.capture_request()
-        frame = req.make_array("main")
-        req.release()
-
-        sprockets = detector.detect(frame, mode="profile")
-        if sprockets:
-            show_debug(frame, sprockets, title="SearchTwo")
-        if len(sprockets) >= 2:
-            return frame, sprockets, steps
-
-        tc.steps_forward(step_chunk)
-        steps += step_chunk
-        time.sleep(0.02)
-
-    print("[CALIB] Could not get two sprockets within max search steps.")
-    return frame, sprockets if 'sprockets' in locals() else [], steps
 
 # -------------------- Measure steps-per-pixel by tracking one sprocket --------------------
 def measure_steps_per_pixel(camera, tc, detector, step_chunk=STEP_CHUNK, max_steps=MAX_STEPS_TRACK):
@@ -304,29 +279,16 @@ def main():
         method="profile"
     )
 
-    # Ensure two sprockets are visible so we can measure pitch in px
-    frame_two, spro_two, _ = ensure_two_sprockets(camera, tc, detector)
-    if len(spro_two) < 2:
-        print("[CALIB] Still <2 sprockets; calibration will proceed but pitch_px may be noisy.")
-    show_debug(frame_two, spro_two, title="TwoSprockets")
-
-# Estimate pitch_px
-    pitch_px = None
-    if len(spro_two) >= 2:
-        spro_two_sorted = sorted(spro_two, key=lambda s: s[1])
-        diffs = [spro_two_sorted[i+1][1] - spro_two_sorted[i][1]
-             for i in range(len(spro_two_sorted)-1)]
-        pitch_px = float(np.median(diffs))
-        print(f"[CALIB] pitch_px estimate from 2 sprockets in view: {pitch_px:.1f}")
+    # Estimate pitch_px using self-scan (single sprocket)
+    pitch_px = self_scan_pitch(camera, tc, detector)
+    if pitch_px:
+        print(f"[CALIB] pitch_px estimate from self-scan: {pitch_px:.1f}")
     else:
-        # fallback: run self-scan to measure pitch from motion
-        pitch_px = self_scan_pitch(camera, tc, detector)
-        if pitch_px:
-            print(f"[CALIB] pitch_px estimate from self-scan: {pitch_px:.1f}")
-        else:
-            pitch_px = 300.0
-            print(f"[CALIB] Using fallback pitch_px={pitch_px:.1f}")
+        pitch_px = 300.0
+        print(f"[CALIB] Using fallback pitch_px={pitch_px:.1f}")
+
     detector.update_pitch(pitch_px)
+
 
     # Multi-run measure steps/pitch via steps/px * pitch_px
     runs = 8
