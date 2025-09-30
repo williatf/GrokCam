@@ -29,7 +29,10 @@ def draw_sprockets_debug(frame, sprockets):
                     (int(cx) + 10, int(cy)),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.5, (255, 0, 0), 1)
-    return debug_frame
+
+        flipped = cv2.flip(debug_frame,0)
+
+    return flipped
 
 def crop_film_frame(frame, anchor, pitch_px=None):
     """
@@ -70,7 +73,7 @@ def crop_film_frame(frame, anchor, pitch_px=None):
     cv2.line(cropped, (0, cy_local), (W, cy_local), (0, 0, 255), 2)
 
     # 🔄 Rotate 180° (flip vertically + horizontally)
-    rotated = cv2.rotate(cropped, cv2.ROTATE_180)
+    flipped = cv2.flip(cropped, 0)
 
     return rotated
 
