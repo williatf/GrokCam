@@ -194,6 +194,7 @@ async def advance_to_next_perforation(
         else:
             # sprocket already past target → accept frame as-is
             print(f"[APP] Sprocket past target at cy={cy}, accepting.")
+            last_error = error
             return (cx, cy)
 
     print("[APP] Alignment failed (max steps reached)")
