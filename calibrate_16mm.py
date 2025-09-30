@@ -209,16 +209,17 @@ def select_relative_crop(img, anchor_xy, win_name="Select Film Frame"):
             print("[CROP] Skipped.")
             return None
 
-def self_scan_pitch(camera, tc, detector, step_size=10, max_steps=2000, min_travel_px=100):
+def self_scan_pitch(camera, tc, detector, step_size=10, max_steps=2000):
     """
     Measure sprocket pitch by:
-    1. Waiting for a sprocket to appear near the top.
-    2. Tracking it until a new sprocket appears higher in the image.
-    3. Pitch = transport steps taken between start of first and appearance of second sprocket.
+    1. Detect top sprocket (anchor_start).
+    2. Wait for a new sprocket to appear above anchor_start.
+    3. Track that new sprocket until it crosses anchor_start's original position.
+    4. Return steps taken = steps per pitch.
     """
-    print("[CALIB] Starting self-scan pitch measurement...")
+    print("[CALIB] Starting simplified self-scan pitch measurement...")
 
-    # capture initial sprocket
+    # Step 1: find initial anchor sprocket (top-most)
     request = camera.capture_request()
     frame = request.make_array("main")
     request.release()
@@ -227,19 +228,21 @@ def self_scan_pitch(camera, tc, detector, step_size=10, max_steps=2000, min_trav
         print("[CALIB] No sprocket detected to start self-scan.")
         return None
 
-    # choose top sprocket as anchor
-    anchor = min(sprockets, key=lambda s: s[1])
-    cy_anchor = anchor[1]
-    cy_start = cy_anchor
+    anchor_start = min(sprockets, key=lambda s: s[1])
+    y_start = anchor_start[1]
+    print(f"[CALIB] Initial sprocket anchor at y={y_start:.1f}")
+
     steps_taken = 0
+    new_sprocket_seen = False
+    y_new = None
 
     while steps_taken < max_steps:
-        # advance film
+        # Advance transport
         tc.steps_forward(step_size)
         steps_taken += step_size
         time.sleep(0.05)
 
-        # capture new frame
+        # Grab new frame
         request = camera.capture_request()
         frame = request.make_array("main")
         request.release()
@@ -247,20 +250,26 @@ def self_scan_pitch(camera, tc, detector, step_size=10, max_steps=2000, min_trav
         if not sprockets:
             continue
 
-        # sort by vertical position
-        spro_sorted = sorted(sprockets, key=lambda s: s[1])
-        new_top = spro_sorted[0][1]
+        # Step 2: look for new sprocket ABOVE y_start
+        if not new_sprocket_seen:
+            top_sprocket = min(sprockets, key=lambda s: s[1])
+            if top_sprocket[1] < y_start:
+                new_sprocket_seen = True
+                y_new = top_sprocket[1]
+                steps_at_new = steps_taken
+                print(f"[CALIB] New sprocket appeared at y={y_new:.1f} after {steps_at_new} steps")
 
-        # if new sprocket has appeared above anchor
-        if new_top < cy_anchor - min_travel_px:
-            pitch_px = cy_anchor - cy_start
-            print(f"[CALIB] New sprocket appeared. pitch_px={pitch_px:.1f} after {steps_taken} steps")
-            return int(pitch_px)
+        # Step 3: once new sprocket is seen, track until it crosses y_start
+        if new_sprocket_seen:
+            # find that sprocket again (closest to previous y_new)
+            sprocket = min(sprockets, key=lambda s: abs(s[1] - y_new))
+            y_new = sprocket[1]
+            if y_new >= y_start:
+                print(f"[CALIB] New sprocket crossed y_start={y_start:.1f} at y={y_new:.1f}")
+                print(f"[CALIB] Steps per pitch = {steps_taken - steps_at_new}")
+                return steps_taken - steps_at_new
 
-        # otherwise, keep tracking anchor as it moves down
-        cy_anchor = min(sprockets, key=lambda s: abs(s[1] - cy_anchor))[1]
-
-    print("[CALIB] Self-scan failed (no new sprocket seen).")
+    print("[CALIB] Self-scan failed (no crossing detected).")
     return None
 
 
