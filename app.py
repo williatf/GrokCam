@@ -290,8 +290,7 @@ async def main():
         handle_client,
         "::",
          5000,
-         ping_interval=60,
-         ping_timeout=120
+         ping_interval=None
     )
     print("Server started")
     await asyncio.Future()
