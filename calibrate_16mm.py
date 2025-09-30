@@ -31,6 +31,7 @@ def show_debug(frame, sprockets, title="calib"):
         y2 = int(round(cy + h / 2))
         cv2.rectangle(dbg, (x1, y1), (x2, y2), (0, 255, 0), 2)
         cv2.circle(dbg, (int(round(cx)), int(round(cy))), 3, (0, 0, 255), -1)
+    dbg_small = cv2.resize(dbg,(640,480))
     cv2.imshow(title, dbg)
     cv2.waitKey(1)
 
