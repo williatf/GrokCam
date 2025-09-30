@@ -150,7 +150,7 @@ async def advance_to_next_perforation(
         await asyncio.sleep(0.05)
     else:
         # try a coarse move by one pitch
-        coarse_steps = steps_per_pitch + int(last_error * steps_per_px)
+        coarse_steps = steps_per_pitch + int(0.5 * last_error * steps_per_px)
         coarse_steps = max(steps_per_pitch // 2, min(steps_per_pitch * 2, coarse_steps))
         tc.steps_forward(coarse_steps)
         steps_taken += coarse_steps
@@ -186,7 +186,7 @@ async def advance_to_next_perforation(
             return (cx, cy)
 
         # adjust forward only (never backward)
-        if error > 0:
+        if abs(error) > tolerance and error > 0:
             correction = int(error * steps_per_px)
             correction = max(2, min(correction, 20))
             tc.steps_forward(correction)
