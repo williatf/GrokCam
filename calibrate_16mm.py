@@ -36,7 +36,7 @@ def show_debug(frame, sprockets, title="calib"):
     cv2.waitKey(1)
 
 # -------------------- Exposure auto-cal --------------------
-def auto_calibrate_exposure(camera, target_p99=240, max_iter=10):
+def auto_calibrate_exposure(camera, target_p99=240, max_iter=20):
     exposure = 1500
     gain = 1.0
     camera.set_controls({"ExposureTime": exposure, "AnalogueGain": gain})
