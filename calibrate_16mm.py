@@ -81,32 +81,24 @@ def ensure_two_sprockets(camera, tc, detector, step_chunk=STEP_CHUNK, max_steps=
 
 # -------------------- Measure steps-per-pixel by tracking one sprocket --------------------
 def measure_steps_per_pitch(camera, tc, detector, step_chunk=STEP_CHUNK, max_steps=MAX_STEPS_TRACK):
-    """
-    Assumes two sprockets are visible.
-    Measures:
-      - pitch_px: vertical spacing between them
-      - steps_per_px: by tracking one sprocket down until near bottom
-    Returns (pitch_px, steps_per_px) or (None, None).
-    """
+    # Capture initial
     req = camera.capture_request()
     frame = req.make_array("main")
     req.release()
-
-    spro = detector.detect(frame, mode="profile")
-    if len(spro) < 2:
-        print("[CALIB] Need at least 2 sprockets to measure.")
+    sprockets = detector.detect(frame, mode="profile")
+    if len(sprockets) < 2:
+        print("[CALIB] Need >=2 sprockets to measure pitch.")
         return None, None
 
-    spro_sorted = sorted(spro, key=lambda s: s[1])
-    pitch_px = spro_sorted[1][1] - spro_sorted[0][1]
-    print(f"[CALIB] pitch_px={pitch_px:.1f}")
+    spro_sorted = sorted(sprockets, key=lambda s: s[1])
+    start = spro_sorted[0]
+    target = spro_sorted[-1]
+    cy_start = start[1]
+    cy_target = target[1]
+    cy_tracked = cy_start
 
-    # Track the top sprocket down
-    cx, cy, w, h, _ = spro_sorted[0]
-    cy_start = cy
-    H = frame.shape[0]
-    bottom_stop = H * (1.0 - BOTTOM_MARGIN_FRAC)
     steps_total = 0
+    print(f"[TRACK] Start at {cy_start:.1f}, Target={cy_target:.1f}")
 
     while steps_total < max_steps:
         tc.steps_forward(step_chunk)
@@ -118,24 +110,24 @@ def measure_steps_per_pitch(camera, tc, detector, step_chunk=STEP_CHUNK, max_ste
         req.release()
         spro_after = detector.detect(frame, mode="profile")
         if not spro_after:
-            break
+            continue
 
-        sprocket = min(spro_after, key=lambda s: abs(s[0] - cx))
-        cx_new, cy_new, _, h_new, _ = sprocket
-        cy = cy_new
+        # Match to same sprocket (closest in y to last known)
+        sprocket = min(spro_after, key=lambda s: abs(s[1] - cy_tracked))
+        cy_tracked = sprocket[1]
 
-        sprocket_bottom = cy + h_new/2
-        if sprocket_bottom >= bottom_stop:
-            break
+        show_debug(frame, spro_after, title="MeasurePitch")
 
-    delta_y = cy - cy_start
-    if delta_y <= 0:
-        print("[CALIB] Invalid sprocket track.")
-        return pitch_px, None
+        print(f"[TRACK] cy_tracked={cy_tracked:.1f}/{cy_target:.1f}, steps={steps_total}")
 
-    steps_per_px = steps_total / delta_y
-    print(f"[CALIB] steps_total={steps_total}, Δy={delta_y:.1f}px → steps/px={steps_per_px:.4f}")
-    return pitch_px, steps_per_px
+        if cy_tracked >= cy_target:
+            delta_y = cy_target - cy_start
+            steps_per_px = steps_total / delta_y if delta_y > 0 else None
+            print(f"[TRACK] Done: Δy={delta_y:.1f}px, steps={steps_total}, steps/px={steps_per_px:.4f}")
+            return steps_per_px, steps_total
+
+    print("[TRACK] Max steps reached, pitch not measured.")
+    return None, None
 
 # -------------------- Outlier filter --------------------
 def reject_outliers(arr, m=2.5):
