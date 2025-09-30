@@ -92,13 +92,13 @@ class SprocketDetector:
 
             # Reject partial sprockets at edges
             if y_top <= top_guard or y_bot >= bottom_guard:
-                print(f"[DEBUG] Rejecting partial band at edges: y_range={y_top}-{y_bot}")
+                #print(f"[DEBUG] Rejecting partial band at edges: y_range={y_top}-{y_bot}")
                 continue
 
             # ... continue with bounding box, width/height, aspect ratio checks
 
 
-            print(f"  y_range: {band[0]}–{band[-1]}, size={len(band)}")
+            #print(f"  y_range: {band[0]}–{band[-1]}, size={len(band)}")
 
             h = y_bot - y_top
             cy = (y_top + y_bot) / 2 + roi_offset[1]
