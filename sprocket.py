@@ -84,7 +84,9 @@ class SprocketDetector:
         # Guard band: ignore sprockets too close to edges
         margin = int(0.02 * H)
 
-        for band in bands:
+        print(f"[DEBUG] Found {len(bands)} candidate bands")
+        for b in bands:
+            print(f"  y_range: {b[0]}–{b[-1]}, size={len(b)}")
             if len(band) < 5:
                 continue
             y_top, y_bot = band[0], band[-1]
