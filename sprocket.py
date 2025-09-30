@@ -80,11 +80,11 @@ class SprocketDetector:
             gap_thresh = 5
             splits = np.where(np.diff(mask_y) > gap_thresh)[0] + 1
             bands = np.split(mask_y, splits)
+            print(f"[DEBUG] Found {len(bands)} candidate bands")
 
         # Guard band: ignore sprockets too close to edges
         margin = int(0.02 * H)
 
-        print(f"[DEBUG] Found {len(bands)} candidate bands")
         for b in bands:
             print(f"  y_range: {b[0]}–{b[-1]}, size={len(b)}")
             if len(band) < 5:
