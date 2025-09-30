@@ -115,16 +115,15 @@ class SprocketDetector:
 
             # aspect ratio check
             ar = w / h if h > 0 else 0
-            torn = False
 
-            if (ar < self.ar_min or ar > self.ar_max) and self.expected_ar:
-                # Recalculate height using expected aspect ratio
-                h_corr = int(round(w / self.expected_ar))
-                y_bot = y_top + h_corr
+            if not (self.ar_min <= ar <= self.ar_max):
+                # Lock top edge, recalc bottom from expected aspect ratio
+                h = int(max(1, w / self.expected_ar))
+                y_bot = y_top + h
                 cy = (y_top + y_bot) / 2 + roi_offset[1]
-                h = h_corr
-                area = w * h
                 torn = True
+            else:
+                torn = False
 
             # Accept if corrected or valid
             if torn:
@@ -155,8 +154,9 @@ class SprocketDetector:
             dbg = cv.cvtColor(gray, cv.COLOR_GRAY2BGR)
             dbg[:, mid_x] = (0, 0, 255)
             for (cx, cy, w, h, area) in sprockets:
+                color = (255, 0, 0) if torn else (0, 255, 255)  # blue if corrected
                 cv.rectangle(dbg, (int(cx - w/2), int(cy - h/2)),
-                             (int(cx + w/2), int(cy + h/2)), (0, 255, 255), 2)
+                            (int(cx + w/2), int(cy + h/2)), color, 2)
                 cv.circle(dbg, (int(cx), int(cy)), 3, (255, 0, 0), -1)
             cv.imwrite(f"{debug_prefix}_profile_dbg.jpg", dbg)
 
