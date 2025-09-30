@@ -81,53 +81,80 @@ def ensure_two_sprockets(camera, tc, detector, step_chunk=STEP_CHUNK, max_steps=
 
 # -------------------- Measure steps-per-pixel by tracking one sprocket --------------------
 def measure_steps_per_pitch(camera, tc, detector, step_chunk=STEP_CHUNK, max_steps=MAX_STEPS_TRACK):
-    # Capture initial
+    """
+    Measure sprocket pitch and steps-per-pixel by:
+    1. Detecting two sprockets in the same frame.
+    2. Tracking the top sprocket until it reaches the original position of the bottom sprocket.
+    Returns (pitch_px, steps_per_px) or (None, None).
+    """
+    # Capture start frame
     req = camera.capture_request()
     frame = req.make_array("main")
     req.release()
-    sprockets = detector.detect(frame, mode="profile")
-    if len(sprockets) < 2:
-        print("[CALIB] Need >=2 sprockets to measure pitch.")
+
+    spro = detector.detect(frame, mode="profile")
+    if len(spro) < 2:
+        print("[CALIB] Need at least 2 sprockets in view to measure pitch.")
         return None, None
 
-    spro_sorted = sorted(sprockets, key=lambda s: s[1])
-    start = spro_sorted[0]
-    target = spro_sorted[-1]
-    cy_start = start[1]
-    cy_target = target[1]
-    cy_tracked = cy_start
+    # Sort sprockets top-to-bottom
+    spro_sorted = sorted(spro, key=lambda s: s[1])
+    top_sprocket = spro_sorted[0]
+    bottom_sprocket = spro_sorted[1]
+
+    cy_start = top_sprocket[1]
+    cy_target = bottom_sprocket[1]
+    pitch_px = cy_target - cy_start
+
+    print(f"[CALIB] Initial pitch estimate: {pitch_px:.1f}px (cy_top={cy_start:.1f}, cy_bottom={cy_target:.1f})")
 
     steps_total = 0
-    print(f"[TRACK] Start at {cy_start:.1f}, Target={cy_target:.1f}")
+    last_debug = 0
+    cy_anchor = cy_start
+    cx_anchor = top_sprocket[0]
 
-    while steps_total < max_steps:
+    while steps_total <= max_steps:
+        # Step forward
         tc.steps_forward(step_chunk)
         steps_total += step_chunk
         time.sleep(0.02)
 
+        # Capture new frame
         req = camera.capture_request()
         frame = req.make_array("main")
         req.release()
+
         spro_after = detector.detect(frame, mode="profile")
         if not spro_after:
-            continue
+            print("[TRACK] Lost sprockets—stop.")
+            break
 
-        # Match to same sprocket (closest in y to last known)
-        sprocket = min(spro_after, key=lambda s: abs(s[1] - cy_tracked))
-        cy_tracked = sprocket[1]
+        # Pick sprocket closest to original anchor x position
+        sprocket = min(spro_after, key=lambda s: abs(s[0] - cx_anchor))
+        cx_new, cy_new, w_new, h_new, _ = sprocket
 
-        show_debug(frame, spro_after, title="MeasurePitch")
+        if steps_total - last_debug >= 50:
+            show_debug(frame, spro_after, title="TrackPitch")
+            last_debug = steps_total
 
-        print(f"[TRACK] cy_tracked={cy_tracked:.1f}/{cy_target:.1f}, steps={steps_total}")
+        print(f"[TRACK] cy: {cy_anchor:.1f} -> {cy_new:.1f} (+{cy_new - cy_anchor:.1f}px) at steps {steps_total}")
+        cy_anchor = cy_new
 
-        if cy_tracked >= cy_target:
-            delta_y = cy_target - cy_start
-            steps_per_px = steps_total / delta_y if delta_y > 0 else None
-            print(f"[TRACK] Done: Δy={delta_y:.1f}px, steps={steps_total}, steps/px={steps_per_px:.4f}")
-            return steps_per_px, steps_total
+        # Stop once top sprocket reaches or exceeds the original bottom sprocket
+        if cy_anchor >= cy_target:
+            print(f"[TRACK] Top sprocket reached target cy={cy_target:.1f}")
+            break
 
-    print("[TRACK] Max steps reached, pitch not measured.")
-    return None, None
+    # Final calculation
+    delta_y = cy_anchor - cy_start
+    if delta_y <= 0 or steps_total <= 0:
+        print(f"[TRACK] Invalid track (Δy={delta_y}, steps={steps_total}).")
+        return None, None
+
+    steps_per_px = steps_total / delta_y
+    print(f"[CALIB] Δy={delta_y:.1f}px, steps={steps_total} → steps/px={steps_per_px:.4f}")
+
+    return pitch_px, steps_per_px
 
 # -------------------- Outlier filter --------------------
 def reject_outliers(arr, m=2.5):
