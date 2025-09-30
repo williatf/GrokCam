@@ -132,7 +132,7 @@ last_error = 0 # difference between actual and target for sprocket detection
 
 async def advance_to_next_perforation(camera, websocket, step_chunk=None):
     if step_chunk is None:
-        step_chunk = steps_per_pitch // 4  # coarse stepping (50% pitch)
+        step_chunk = steps_per_pitch // 4  # 25% pitch
 
     tracked_cy = None
 
@@ -151,21 +151,31 @@ async def advance_to_next_perforation(camera, websocket, step_chunk=None):
             await asyncio.sleep(0.01)
             continue
 
-        sprockets.sort(key=lambda s: s[1])
-        top = sprockets[0]
-        cx, cy, *_ = top
+        sprockets.sort(key=lambda s: s[1])  # top sprocket
+        cx, cy, *_ = sprockets[0]
 
         if tracked_cy is None:
-            # First sprocket, just start tracking
+            # First detection: begin tracking
+            tracked_cy = cy
+            print(f"[APP] Tracking first sprocket at cy={cy:.1f}")
+        else:
+            if cy < tracked_cy:
+                # New sprocket rolled in above
+                print(f"[APP] New sprocket at cy={cy:.1f}, replacing old (was {tracked_cy:.1f})")
+                return (cx, cy)
+
+            # Still the same sprocket, update tracking
             tracked_cy = cy
 
-        elif cy < tracked_cy - 5:  # new sprocket appeared above
-            print(f"[APP] New sprocket at cy={cy:.1f}, using as anchor")
-            return (cx, cy)
+            # Safety: if sprocket has moved down >1 pitch without new one, accept
+            if cy - tracked_cy > 0.9 * SPROCKET_PITCH_PX:
+                print(f"[APP] Old sprocket moved ~1 pitch, accepting at cy={cy:.1f}")
+                return (cx, cy)
 
-        # Keep stepping forward until a new sprocket shows
+        # Step forward a chunk and try again
         tc.steps_forward(step_chunk)
         await asyncio.sleep(0.01)
+
 
 async def handle_client(websocket):
     print("Client connected")
