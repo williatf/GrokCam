@@ -204,7 +204,7 @@ async def handle_client(websocket):
 
                 # Crop actual film frame relative to sprocket anchor
                 frame_cropped = crop_film_frame(
-                    frame_bgr, anchor, SPROCKET_PITCH_PX)
+                    frame_bgr, anchor, SPROCKET_PITCH_PX
                 )
 
                 # Re-encode cropped frame to JPEG
