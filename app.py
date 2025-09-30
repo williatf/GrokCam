@@ -12,13 +12,16 @@ from sprocket import SprocketDetector
 import socket
 import os
 
-def crop_film_frame(frame, anchor, pitch_px=SPROCKET_PITCH_PX):
+def crop_film_frame(frame, anchor, pitch_px=None):
     """
     Crop relative to sprocket anchor:
     - Full width
     - Height = 120% of sprocket pitch
     - Anchor sits 10% from the top
     """
+    if pitch_px is None:
+        pitch_px = SPROCKET_PITCH_PX
+
     if anchor is None or pitch_px is None:
         return frame
 
