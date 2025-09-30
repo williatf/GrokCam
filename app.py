@@ -22,7 +22,7 @@ def draw_sprockets_debug(frame, sprockets):
 
         # Draw center
         cv2.circle(debug_frame, (int(cx), int(cy)), 6, (0, 0, 255), -1)
-        print("[Crop-Debug] cy is {int(cy)}")
+        print(f"[Crop-Debug] cy is {int(cy)}")
 
         # Label coordinates
         cv2.putText(debug_frame, f"cy={cy:.1f}",
@@ -46,7 +46,7 @@ def crop_film_frame(frame, anchor, pitch_px=None):
 
     H, W = frame.shape[:2]
     cx, cy = int(anchor[0]), int(anchor[1])
-    print("[CROP] cy is {cy}")
+    print(f"[CROP] cy is {cy}")
 
     crop_h = int(pitch_px * 1.2)
     offset = int(0.1 * crop_h)
