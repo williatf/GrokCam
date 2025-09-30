@@ -122,9 +122,12 @@ def measure_steps_per_pitch(camera, tc, detector, step_chunk=STEP_CHUNK, max_ste
 
         if cy_tracked >= cy_target:
             delta_y = cy_target - cy_start
+            pitch_px = delta_y if delta_y > 0 else None
             steps_per_px = steps_total / delta_y if delta_y > 0 else None
-            print(f"[TRACK] Done: Δy={delta_y:.1f}px, steps={steps_total}, steps/px={steps_per_px:.4f}")
-            return steps_per_px, steps_total
+
+            print(f"[TRACK] Done: pitch={pitch_px:.1f}px, steps={steps_total}, steps/px={steps_per_px:.4f}")
+            return pitch_px, steps_per_px
+
 
     print("[TRACK] Max steps reached, pitch not measured.")
     return None, None
