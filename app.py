@@ -51,12 +51,14 @@ async def encode_frame_async(frame_cropped, frame_num):
 
 def encode_frame(frame_cropped, frame_num):
     _, encoded = cv2.imencode('.jpg', frame_cropped, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
-    img_base64 = base64.b64encode(encoded).decode('utf-8')
-    return json.dumps({
+    jpg_bytes = encoded.tobytes()
+    header = json.dumps({
         'event': 'new_image',
         'frame': frame_num,
-        'image': img_base64
+        'size': len(jpg_bytes)
     })
+
+    return header, jpg_bytes
 
 # --- Load calibration + config ---
 def load_settings():
@@ -235,8 +237,9 @@ async def handle_client(websocket):
                 )
 
                 # Re-encode cropped frame to JPEG
-                msg = await encode_frame_async(frame_cropped, frame)
-                await websocket.send(msg)
+                header, jpg_bytes = await encode_frame_async(frame_cropped, frame)
+                await websocket.send(header)
+                await websocket.send(jpg_bytes)
 
 
                 print(f"[APP] Sent frame {frame}")
