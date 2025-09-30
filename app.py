@@ -252,10 +252,11 @@ async def handle_client(websocket):
                 )
 
                 # Re-encode cropped frame to JPEG
-                #header, jpg_bytes = await encode_frame_async(frame_cropped, frame)
-                header, jpg_bytes = await encode_frame_async(debug_frame, frame)
-                await websocket.send(header)
-                await websocket.send(jpg_bytes)
+                _, cropped_bytes = await encode_frame_async(frame_cropped, frame)
+                _, debug_bytes = await encode_frame_async(debug_frame, frame)
+                header = len(cropped_bytes).tobytes(4,'big') # 4-byte big-endian int
+                payload = header + cropped_bytes + debug_bytes
+                await websocket.send(payload)
 
 
                 print(f"[APP] Sent frame {frame}")
