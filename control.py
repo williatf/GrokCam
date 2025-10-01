@@ -90,6 +90,12 @@ class tcControl:
             time.sleep(0.1)
             wiringpi.digitalWrite(pin, 0)
 
+    def rewind(self):
+        pin = self.TAKEUP_PINS[1]
+        wiringpi.digitalWrite(pin, 1)
+        time.sleep(1)
+        wiringpi.digitalWrite(pin, 0)
+
     def clean_up(self):
         self.light_off()
         wiringpi.digitalWrite(self.STEPPER_PINS[2], 0)
