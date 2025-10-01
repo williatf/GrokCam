@@ -305,8 +305,11 @@ async def handle_client(websocket):
             frame_cropped = crop_film_frame(frame_bgr, anchor, SPROCKET_PITCH_PX)
 
             # Encode cropped image
-            _, encoded = cv2.imencode(".jpg", frame_cropped, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
-            await websocket.send(encoded.tobytes())  # binary send
+            _, cropped_bytes = await encode_frame_async(frame_cropped, frame)
+            _, debug_bytes = await encode_frame_async(debug_frame, frame)
+            header = len(cropped_bytes).to_bytes(4,'big') # 4-byte big-endian int
+            payload = header + cropped_bytes + debug_bytes
+            await websocket.send(payload)
 
             await websocket.send(json.dumps({
                 "event": "info",
