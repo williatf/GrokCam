@@ -341,6 +341,12 @@ async def handle_client(websocket):
             finally:
                 cv2.destroyWindow("Focus Preview")
 
+        elif event == "focus_stop":
+            self_focus = False
+            tc.light_off()
+            camera.stop()
+            print("[APP] Focus mode stopped")
+
 async def main():
     print("Starting WebSocket server on ws://0.0.0.0:5000")
     server = await websockets.serve(
