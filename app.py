@@ -309,8 +309,8 @@ async def handle_client(websocket):
             frame_cropped = crop_film_frame(frame_bgr, anchor, SPROCKET_PITCH_PX)
 
             # Encode cropped image
-            _, cropped_bytes = await encode_frame_async(frame_cropped, frame)
-            _, debug_bytes = await encode_frame_async(debug_frame, frame)
+            _, cropped_bytes = await encode_frame_async(frame_cropped, 1)
+            _, debug_bytes = await encode_frame_async(debug_frame, 1)
             header = len(cropped_bytes).to_bytes(4,'big') # 4-byte big-endian int
             payload = header + cropped_bytes + debug_bytes
             await websocket.send(payload)
