@@ -284,6 +284,9 @@ async def handle_client(websocket):
         if data.get('event') == 'jog_forward' or data.get('event') == 'jog_back':
             frames = int(data.get("frames", 1))
             direction = 1 if data.get('event') == "jog_forward" else -1
+            tc.light_on()
+            camera.start()
+            print("[APP] LED on + camera, stabilizing...")
 
             steps_per_pitch = STEPS_PER_PITCH
             for f in range(frames):
@@ -315,6 +318,9 @@ async def handle_client(websocket):
                 "event": "info",
                 "message": f"Jogged {'forward' if direction>0 else 'back'} {frames} frames"
             }))
+            tc.clean_up()
+            camera.stop()
+
 
 async def main():
     print("Starting WebSocket server on ws://0.0.0.0:5000")
