@@ -323,6 +323,23 @@ async def handle_client(websocket):
             tc.clean_up()
             camera.stop()
 
+        if data.get('event') == 'focus_start'
+            tc.light_on()
+            camera.start()
+            self_focus = True
+            print("[APP] Focus mode started")
+            try:
+                while self_focus:
+                    buffer = io.BytesIO()
+                    camera.capture_file(buffer, format='jpeg')
+                    frame_bgr = cv2.imdecode(np.frombuffer(buffer.getvalue(), np.uint8), cv2.IMREAD_COLOR)
+
+                    cv2.imshow("Focus Preview", frame_bgr)
+                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                        break
+                    await asyncio.sleep(0.05)
+            finally:
+                cv2.destroyWindow("Focus Preview")
 
 async def main():
     print("Starting WebSocket server on ws://0.0.0.0:5000")
