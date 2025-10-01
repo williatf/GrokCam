@@ -323,7 +323,7 @@ async def handle_client(websocket):
             tc.clean_up()
             camera.stop()
 
-        if data.get('event') == 'focus_start'
+        if data.get('event') == 'focus_start':
             tc.light_on()
             camera.start()
             self_focus = True
