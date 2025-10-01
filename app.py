@@ -294,6 +294,7 @@ async def handle_client(websocket):
                     tc.steps_forward(steps_per_pitch)
                 else:
                     tc.steps_back(steps_per_pitch)
+                    tc.rewind()
                 await asyncio.sleep(0.05)
 
             # Capture image after jogging
