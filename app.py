@@ -341,7 +341,7 @@ async def handle_client(websocket):
             finally:
                 cv2.destroyWindow("Focus Preview")
 
-        elif event == "focus_stop":
+        elif data.get('event') == "focus_stop":
             self_focus = False
             tc.light_off()
             camera.stop()
