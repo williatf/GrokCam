@@ -297,6 +297,7 @@ async def handle_client(websocket):
                 await asyncio.sleep(0.05)
 
             # Capture image after jogging
+            anchor = await advance_to_next_perforation(camera, websocket)
             buffer = io.BytesIO()
             camera.capture_file(buffer, format='jpeg')
             frame_bgr = cv2.imdecode(np.frombuffer(buffer.getvalue(), np.uint8), cv2.IMREAD_COLOR)
