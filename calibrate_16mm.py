@@ -36,33 +36,44 @@ def show_debug(frame, sprockets, title="calib"):
     cv2.waitKey(1)
 
 # -------------------- Exposure auto-cal --------------------
-def auto_calibrate_exposure(camera, target_p99=240, max_iter=20):
-    exposure = 1500
-    gain = 1.0
-    camera.set_controls({"ExposureTime": exposure, "AnalogueGain": gain})
-    time.sleep(0.2)
+def auto_calibrate_exposure(camera, settle_time=2.0):
+    """
+    Enable auto-exposure and auto-white-balance briefly, let them settle,
+    then lock the chosen ExposureTime and AnalogueGain for consistent captures.
+    """
+    # Turn on auto exposure/white balance
+    camera.set_controls({
+        "AeEnable": True,
+        "AwbEnable": True
+    })
+    print("[CALIB] Auto-exposure enabled, settling...")
+    time.sleep(settle_time)
 
-    last_frame = None
-    for i in range(max_iter):
-        req = camera.capture_request()
-        frame = req.make_array("main")
-        req.release()
-        last_frame = frame
+    # Grab current metadata (chosen by AE)
+    metadata = camera.capture_metadata()
+    exposure = metadata.get("ExposureTime", None)
+    gain = metadata.get("AnalogueGain", None)
 
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        p99 = np.percentile(gray, 99)
-        print(f"[CALIB] Iter {i}: p99={int(p99)}, Exposure={exposure}, Gain={gain}")
+    print(f"[CALIB] AE selected ExposureTime={exposure}, Gain={gain}")
 
-        if abs(p99 - target_p99) < 5:
-            print("[CALIB] Target reached.")
-            break
+    # Lock those values
+    if exposure and gain:
+        camera.set_controls({
+            "AeEnable": False,
+            "AwbEnable": False,
+            "ExposureTime": exposure,
+            "AnalogueGain": gain
+        })
+        print("[CALIB] Exposure locked.")
+    else:
+        print("[CALIB] Warning: AE did not return exposure/gain.")
 
-        exposure = int(exposure * target_p99 / max(p99, 1))
-        exposure = max(100, min(20000, exposure))
-        camera.set_controls({"ExposureTime": exposure, "AnalogueGain": gain})
-        time.sleep(0.2)
+    # Capture one frame with locked settings for confirmation
+    req = camera.capture_request()
+    frame = req.make_array("main")
+    req.release()
 
-    return last_frame, exposure, gain
+    return frame, exposure, gain
 
 def ensure_two_sprockets(camera, tc, detector, step_chunk=STEP_CHUNK, max_steps=MAX_STEPS_SEARCH):
     steps = 0
