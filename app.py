@@ -209,6 +209,9 @@ async def advance_to_next_perforation(camera, websocket, step_chunk=None):
         await asyncio.sleep(0.01)
 
 
+SAVE_DIR = "/media/pi/SG1TB/GrokCam/testframes"
+os.makedirs(SAVE_DIR, exist_ok=True)
+
 async def handle_client(websocket):
     print("Client connected")
     stop_requested = False
@@ -234,43 +237,48 @@ async def handle_client(websocket):
                     }))
                     break
 
-                # Capture full frame
+                # --- Capture full frame ---
                 buffer = io.BytesIO()
                 camera.capture_file(buffer, format='jpeg')
                 buffer.seek(0)
-
                 frame_bgr = cv2.imdecode(
                     np.frombuffer(buffer.getvalue(), np.uint8),
                     cv2.IMREAD_COLOR
                 )
 
-                # --- debug ---
-                # Detect sprockets
+                # --- Detect sprockets + crop film frame ---
                 sprockets = detector.detect(frame_bgr, mode="profile")
-
-                # Draw debug overlays
                 debug_frame = draw_sprockets_debug(frame_bgr, sprockets if sprockets else [])
-
-                # Crop actual film frame relative to sprocket anchor
                 frame_cropped = crop_film_frame(
-                    frame_bgr, sprockets[0], SPROCKET_PITCH_PX
+                    frame_bgr, sprockets[0] if sprockets else None, SPROCKET_PITCH_PX
                 )
 
-                # Re-encode cropped frame to JPEG
-                _, cropped_bytes = await encode_frame_async(frame_cropped, frame)
+                # --- Save cropped (hi-res, lossless) to disk ---
+                timestamp = int(time.time() * 1000)
+                filename = os.path.join(SAVE_DIR, f"frame_{timestamp}.png")
+                cv2.imwrite(filename, frame_cropped)  # PNG = lossless
+
+                # --- Downscale cropped for sending to client ---
+                scale_w = 800
+                scale_h = int(frame_cropped.shape[0] * (scale_w / frame_cropped.shape[1]))
+                frame_lowres = cv2.resize(frame_cropped, (scale_w, scale_h), interpolation=cv2.INTER_AREA)
+
+                # --- Encode (low-res + debug) for client ---
+                _, cropped_bytes = await encode_frame_async(frame_lowres, frame)
                 _, debug_bytes = await encode_frame_async(debug_frame, frame)
-                header = len(cropped_bytes).to_bytes(4,'big') # 4-byte big-endian int
+
+                header = len(cropped_bytes).to_bytes(4, 'big')  # 4-byte size for first image
                 payload = header + cropped_bytes + debug_bytes
                 await websocket.send(payload)
 
+                print(f"[APP] Sent frame {frame} → saved cropped {filename}")
 
-                print(f"[APP] Sent frame {frame}")
-
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.1)
 
             await websocket.send(json.dumps({'event': 'capture_complete'}))
             tc.clean_up()
             camera.stop()
+
 
         if data.get('event') == 'stop_capture':
             print("[APP] Stop requested")
