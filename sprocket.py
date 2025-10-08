@@ -71,15 +71,16 @@ class SprocketDetector:
         mid_x = W // 2
         column = gray[:, mid_x]
         col_norm = column / 255.0
-        thresh_val = np.max(col_norm) * 0.95
+        thresh_val = np.max(col_norm) * 0.97
         mask_y = np.where(col_norm > thresh_val)[0]
 
         sprockets = []
-        bands = []
         if len(mask_y) > 0:
             gap_thresh = 5
             splits = np.where(np.diff(mask_y) > gap_thresh)[0] + 1
             bands = np.split(mask_y, splits)
+        else:
+            bands[]
 
         # Guard band: ignore sprockets too close to edges
         top_guard = int(0.005 * H)       # top 0.5% of frame
@@ -92,13 +93,7 @@ class SprocketDetector:
 
             # Reject partial sprockets at edges
             if y_top <= top_guard or y_bot >= bottom_guard:
-                #print(f"[DEBUG] Rejecting partial band at edges: y_range={y_top}-{y_bot}")
                 continue
-
-            # ... continue with bounding box, width/height, aspect ratio checks
-
-
-            #print(f"  y_range: {band[0]}–{band[-1]}, size={len(band)}")
 
             h = y_bot - y_top
             cy = (y_top + y_bot) / 2 + roi_offset[1]
@@ -106,9 +101,12 @@ class SprocketDetector:
             # horizontal row near mid-sprocket
             row_y = int((y_top + y_bot) / 2)
             row = gray[row_y, :]
-
             peak_val = np.max(row)
-            thresh_row = peak_val * 0.95
+            thresh_row = peak_val * 0.97
+
+            # Reject faint bands outright
+            if peak_val < 180: #0-255 grayscale
+                continue
 
             # Walk left/right from mid_x
             x_left = mid_x
@@ -121,6 +119,10 @@ class SprocketDetector:
             w = x_right - x_left
             cx = (x_left + x_right) / 2 + roi_offset[0]
             area = w * h
+
+            # -- new area filter ---
+            if area < self.min_area or area > self.max_area:
+                continue
 
             # aspect ratio check
             ar = w / h if h > 0 else 0
@@ -140,23 +142,6 @@ class SprocketDetector:
             else:
                 if self.ar_min <= ar <= self.ar_max:
                     sprockets.append((cx, cy, w, h, area))
-
-        # Calibration update
-        if self.expected_pitch is None and len(sprockets) >= 2:
-            pitches = [sprockets[i+1][1] - sprockets[i][1] for i in range(len(sprockets)-1)]
-            self.expected_pitch = int(np.median(pitches))
-            print(f"[SPROCKET] Calibrated expected_pitch={self.expected_pitch}px")
-
-        if self.expected_width is None and len(sprockets) >= 1:
-            widths = [s[2] for s in sprockets]
-            self.expected_width = int(np.median(widths))
-            print(f"[SPROCKET] Calibrated expected_width={self.expected_width}px")
-
-        if self.expected_ar is None and len(sprockets) >= 1:
-            ars = [s[2] / s[3] for s in sprockets if s[3] > 0]
-            if ars:
-                self.expected_ar = float(np.median(ars))
-                print(f"[SPROCKET] Calibrated expected_ar={self.expected_ar:.3f}")
 
         # Debug
         if debug_prefix is not None:
