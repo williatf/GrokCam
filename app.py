@@ -198,26 +198,30 @@ async def advance_to_next_perforation(camera, websocket,
                                       target_y=None,
                                       steps_per_pitch=None,
                                       steps_per_px=None,
-                                      k_gain=0.6,
+                                      k_gain=0.4,
                                       min_step=5,
-                                      max_step=None):
+                                      max_step=None,
+                                      smooth_alpha=0.6,
+                                      new_sprocket_min_delta_frac=0.4):
     """
     Advance film until a new sprocket appears at the top of the image,
     using feedback from detected sprocket position to self-correct
     overshoot or undershoot dynamically.
+    Stabilized version with smoothing, min delta, and correction limits.
     """
     if steps_per_pitch is None or steps_per_px is None:
         raise ValueError("Calibration values (steps_per_pitch, steps_per_px) required.")
 
     if max_step is None:
-        max_step = steps_per_pitch  # safe upper bound
+        max_step = int(steps_per_pitch * 1.5)
     if target_y is None:
-        # target sprocket center fraction (e.g., 35% down from top)
         frame_H = camera.capture_array("main").shape[0]
         target_y = int(frame_H * 0.35)
 
     step_chunk = steps_per_pitch // 2  # start with nominal half pitch
     tracked_cy = None
+    smoothed_cy = None
+    new_sprocket_min_delta = new_sprocket_min_delta_frac * (steps_per_pitch / steps_per_px)
 
     print(f"[APP] Adaptive advance: target_y={target_y}, start step_chunk={step_chunk}")
 
@@ -238,33 +242,34 @@ async def advance_to_next_perforation(camera, websocket,
         cx, cy, *_ = sprockets[0]
 
         if tracked_cy is None:
-            # first sprocket detected — anchor
             tracked_cy = cy
+            smoothed_cy = cy
             print(f"[APP] Tracking initial sprocket at cy={cy:.1f}")
         else:
-            if cy < tracked_cy:
-                # new sprocket rolled in above
-                print(f"[APP] New sprocket detected at cy={cy:.1f}, replacing old (was {tracked_cy:.1f})")
-                # optional correction feedback: adjust step size for next frame
-                error_px = target_y - cy
-                correction = int(error_px * steps_per_px * k_gain)
-                print(f"[APP] Correction from last frame: error={error_px:+.1f}px → adjust {correction:+d} steps")
+            # smooth the y position to reduce bounce
+            smoothed_cy = smooth_alpha * cy + (1 - smooth_alpha) * smoothed_cy
 
-                # store adjusted nominal step for future frames
+            if smoothed_cy < tracked_cy - new_sprocket_min_delta:
+                # confirmed new sprocket rolled in
+                print(f"[APP] Confirmed new sprocket at cy={smoothed_cy:.1f}, replacing old (was {tracked_cy:.1f})")
+
+                # feedback correction
+                error_px = target_y - smoothed_cy
+                correction = int(error_px * steps_per_px * k_gain)
+
+                # clamp correction magnitude
+                max_corr = int(0.15 * steps_per_pitch)
+                correction = max(min(correction, max_corr), -max_corr)
+
                 new_nominal = steps_per_pitch + correction
                 new_nominal = max(min(new_nominal, max_step), min_step)
+
+                print(f"[APP] Correction: error={error_px:+.1f}px → adjust {correction:+d} steps")
                 print(f"[APP] Updated nominal pitch for next advance: {new_nominal} steps")
 
-                # return current sprocket position and new nominal for caller to persist
-                return (cx, cy, new_nominal)
+                return (cx, smoothed_cy, new_nominal)
 
-            # still same sprocket, update position
-            tracked_cy = cy
-
-            # safety: if sprocket moved ~1 pitch but no new one found, bail
-            if cy - tracked_cy > 0.9 * SPROCKET_PITCH_PX:
-                print(f"[APP] Old sprocket moved ~1 pitch, accepting at cy={cy:.1f}")
-                return (cx, cy, steps_per_pitch)
+            tracked_cy = smoothed_cy
 
         # --- move forward and retry ---
         tc.steps_forward(step_chunk)
