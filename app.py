@@ -291,7 +291,7 @@ async def handle_client(websocket):
             for frame in range(num_frames):
                 if stop_requested:
                     break
-                anchor = await advance_to_next_perforation(camera, websocket)
+                anchor = await advance_to_next_perforation(camera, websocket,settings.get("steps_per_pitch", 280), settings.get("steps_per_px", 0.5))
                 if not anchor:
                     await websocket.send(json.dumps({
                         'event': 'error',
@@ -368,7 +368,7 @@ async def handle_client(websocket):
                 #await asyncio.sleep(0.05)
 
             # Capture image after jogging
-            anchor = await advance_to_next_perforation(camera, websocket)
+            anchor = await advance_to_next_perforation(camera, websocket,settings.get("steps_per_pitch", 280), settings.get("steps_per_px", 0.5))
             buffer = io.BytesIO()
             camera.capture_file(buffer, format='jpeg')
             frame_bgr = cv2.imdecode(np.frombuffer(buffer.getvalue(), np.uint8), cv2.IMREAD_COLOR)
