@@ -83,8 +83,8 @@ class SprocketDetector:
             bands = []
 
         # Guard band: ignore sprockets too close to edges
-        top_guard = int(0.005 * H)       # top 0.5% of frame
-        bottom_guard = int(H * (1.0 - 0.005))  # bottom 0.5% of frame
+        top_guard = int(0.002 * H)       # top 0.5% of frame
+        bottom_guard = int(H * (1.0 - 0.002))  # bottom 0.5% of frame
 
         for band in bands:
             if len(band) < 5:
