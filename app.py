@@ -303,7 +303,7 @@ async def handle_client(websocket):
                 else:
                     tc.steps_back(steps_per_pitch)
                     tc.rewind()
-                await asyncio.sleep(0.05)
+                #await asyncio.sleep(0.05)
 
             # Capture image after jogging
             anchor = await advance_to_next_perforation(camera, websocket)
