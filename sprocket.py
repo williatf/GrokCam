@@ -80,7 +80,7 @@ class SprocketDetector:
             splits = np.where(np.diff(mask_y) > gap_thresh)[0] + 1
             bands = np.split(mask_y, splits)
         else:
-            bands[]
+            bands = []
 
         # Guard band: ignore sprockets too close to edges
         top_guard = int(0.005 * H)       # top 0.5% of frame
