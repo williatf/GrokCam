@@ -143,6 +143,35 @@ def measure_steps_per_pitch(camera, tc, detector, step_chunk=STEP_CHUNK, max_ste
     print("[TRACK] Max steps reached, pitch not measured.")
     return None, None
 
+def compute_area_bounds(areas):
+    """
+    Compute robust nominal/min/max sprocket area bounds.
+    Returns (nominal_area, min_area, max_area).
+    """
+    if not areas:
+        return 10000, 7000, 13000  # fallback for safety
+
+    a = np.array(areas, dtype=float)
+    a = a[a > 0]
+    if a.size < 5:
+        med = float(np.median(a))
+        return int(med), int(med * 0.7), int(med * 1.3)
+
+    med = float(np.median(a))
+    q1 = np.percentile(a, 25)
+    q3 = np.percentile(a, 75)
+    iqr = max(1.0, q3 - q1)
+
+    lo = max(med * 0.6, q1 - 1.5 * iqr)
+    hi = min(med * 1.6, q3 + 1.5 * iqr)
+
+    # Ensure at least ±20% band
+    lo = min(lo, med * 0.8)
+    hi = max(hi, med * 1.2)
+
+    return int(med), int(lo), int(hi)
+
+
 # -------------------- Outlier filter --------------------
 def reject_outliers(arr, m=2.5):
     arr = np.asarray(arr)
@@ -243,6 +272,7 @@ def main():
 
     runs = 8
     pitch_vals, steps_per_pitch_vals = [], []
+    area_samples = []
     for run in range(runs):
         print(f"\n[CALIB] === Run {run+1}/{runs} ===")
 
@@ -251,6 +281,11 @@ def main():
         if not spro or len(spro) < 2:
             print("[CALIB] Could not find 2 sprockets, skipping run.")
             continue
+
+        # Collect area samples from detected sprockets
+        for (_, _, _, _, area) in spro:
+            area_samples.append(area)
+
 
         pitch_px, steps_per_px = measure_steps_per_pitch(camera, tc, detector)
         if pitch_px and steps_per_px:
@@ -277,6 +312,11 @@ def main():
 
     print(f"\n[CALIB] Final pitch_px={avg_pitch:.1f}, steps/pitch={avg_spp}")
 
+    # --- Compute sprocket area bounds ---
+    nom_area, min_area, max_area = compute_area_bounds(area_samples)
+    print(f"[CALIB] Sprocket area nominal={nom_area}, range=({min_area}, {max_area})")
+
+
     # Save calibration.json (simplified)
     calibration_data = {
         "exposure_time": exp,
@@ -284,6 +324,9 @@ def main():
         "sprocket_pitch_px": float(avg_pitch) if avg_pitch else None,
         "steps_per_pitch": avg_spp,
         "calibration_resolution": list(FULL_RES)
+        "sprocket_area_nominal": nom_area,
+        "sprocket_area_min": min_area,
+        "sprocket_area_max": max_area
     }
     with open("calibration.json", "w") as f:
         json.dump(calibration_data, f, indent=2)
