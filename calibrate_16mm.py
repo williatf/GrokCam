@@ -262,7 +262,7 @@ def main():
 
     detector = SprocketDetector(
         side="left", auto_roi=0.40,
-        min_area=1500, max_area=25000,
+        min_area=83000, max_area=125000,
         ar_min=1.2, ar_max=1.8,
         solidity_min=0.75,
         blur=5, open_k=5, close_k=3,
