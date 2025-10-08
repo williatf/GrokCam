@@ -57,14 +57,14 @@ class tcControl:
                 wiringpi.digitalWrite(self.STEPPER_PINS[0], 1)  # pusher step
                 pusher_counter -= 1.0
 
-            time.sleep(0.001)
+            time.sleep(0.000001)
 
             # --- STEP LOW ---
             wiringpi.digitalWrite(self.STEPPER_PINS2[0], 0)
             if pusher_step:
                 wiringpi.digitalWrite(self.STEPPER_PINS[0], 0)
 
-            time.sleep(0.001)
+            #time.sleep(0.001)
 
             self.steps_taken += 1
             if self.steps_taken >= 550:
