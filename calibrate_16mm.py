@@ -91,7 +91,7 @@ def ensure_two_sprockets(camera, tc, detector, step_chunk=STEP_CHUNK, max_steps=
     return None, [], steps
 
 # -------------------- Measure steps-per-pixel by tracking one sprocket --------------------
-def measure_steps_per_pitch(camera, tc, detector,def measure_steps_per_pitch(camera, tc, detector,
+def measure_steps_per_pitch(camera, tc, detector,
                             step_chunk=STEP_CHUNK, 
                             max_steps=MAX_STEPS_TRACK,
                             target_frac=0.35,   # target sprocket center fraction
