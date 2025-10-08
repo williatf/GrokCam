@@ -210,7 +210,7 @@ async def advance_to_next_perforation(camera, websocket, step_chunk=None):
         await asyncio.sleep(0.01)
 
 
-SAVE_DIR = "/media/pi/SG1TB/GrokCam/testframes"
+SAVE_DIR = "/media/williatf/SG1TB/GrokCam/testframes"
 os.makedirs(SAVE_DIR, exist_ok=True)
 
 async def handle_client(websocket):
