@@ -1,4 +1,4 @@
-name: Deploy to Raspberry Pi
+name: Deploy to pi4
 
 on:
   push:
@@ -14,17 +14,19 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.PI_KEY }}" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
-          # use port 2206 when scanning host key
-          ssh-keyscan -p 2206 ${{ secrets.PI_HOST }} >> ~/.ssh/known_hosts
+          # use port 2204 when scanning host key
+          ssh-keyscan -p 2204 ${{ secrets.PI_HOST }} >> ~/.ssh/known_hosts
 
       - name: Deploy code
         run: |
-          ssh -i ~/.ssh/id_ed25519 -p 2206 ${{ secrets.PI_USER }}@${{ secrets.PI_HOST }} "cd ${{ secrets.PI_DIR }} && git pull --ff-only"
+          ssh -i ~/.ssh/id_ed25519 -p 2204 -o StrictHostKeyChecking=no \
+            ${{ secrets.PI_USER }}@${{ secrets.PI_HOST }} \
+            "cd ${{ secrets.PI_DIR }} && git pull --ff-only"
 
       - name: Restart service (optional)
         env:
           SERVICE_NAME: ${{ secrets.SERVICE_NAME }}
         run: |
           if [ -n "$SERVICE_NAME" ]; then
-            ssh -i ~/.ssh/id_ed25519 -p 2206 ${{ secrets.PI_USER }}@${{ secrets.PI_HOST }} "sudo systemctl restart $SERVICE_NAME"
+            ssh -i ~/.ssh/id_ed25519 -p 2204 ${{ secrets.PI_USER }}@${{ secrets.PI_HOST }} "sudo systemctl restart $SERVICE_NAME"
           fi
