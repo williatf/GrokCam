@@ -98,8 +98,9 @@ class SprocketDetector:
             h = y_bot - y_top
             cy = (y_top + y_bot) / 2 + roi_offset[1]
 
-            # horizontal row near mid-sprocket
-            row_y = int((y_top + y_bot) / 2)
+            # horizontal row near upper 25% of sprocket
+            row_y = int((y_top 0.25 * (y_bot - y_top))
+            row_y = max(0, min(H - 1, row_y)) # clamp to frame bounds
             row = gray[row_y, :]
             peak_val = np.max(row)
             thresh_row = peak_val * 0.95
@@ -120,28 +121,29 @@ class SprocketDetector:
             cx = (x_left + x_right) / 2 + roi_offset[0]
             area = w * h
 
-            # -- new area filter ---
-            if area < self.min_area or area > self.max_area:
-                continue
-
             # aspect ratio check
             ar = w / h if h > 0 else 0
 
             if not (self.ar_min <= ar <= self.ar_max):
                 # Lock top edge, recalc bottom from expected aspect ratio
-                h = int(max(1, w / self.expected_ar))
-                y_bot = y_top + h
-                cy = (y_top + y_bot) / 2 + roi_offset[1]
-                torn = True
+                if self.expected_ar:
+                    h = int(max(1, w / self.expected_ar))
+                    y_bot = y_top + h
+                    cy = (y_top + y_bot) / 2 + roi_offset[1]
+                    ar = w / h
+                    torn = True
+                else:
+                    torn = False
             else:
                 torn = False
 
-            # Accept if corrected or valid
-            if torn:
-                sprockets.append((cx, cy, w, h, area))
-            else:
-                if self.ar_min <= ar <= self.ar_max:
-                    sprockets.append((cx, cy, w, h, area))
+            # -- new area filter ---
+            area = w * h
+            if area < self.min_area or area > self.max_area:
+                continue
+
+            # accept candidate
+            sprockets.append((cx, cy, w, h, area))
 
         # Debug
         if debug_prefix is not None:
