@@ -213,7 +213,7 @@ async def advance_to_next_perforation(camera, websocket,
         max_step = steps_per_pitch  # safe upper bound
     if target_y is None:
         # target sprocket center fraction (e.g., 35% down from top)
-        frame_H = camera.capture_metadata()["SensorHeight"]
+        frame_H = camera.capture_array("main").shape[0]
         target_y = int(frame_H * 0.35)
 
     step_chunk = steps_per_pitch // 2  # start with nominal half pitch
