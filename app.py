@@ -65,7 +65,6 @@ def draw_sprockets_debug(frame, sprockets):
     flipped = cv2.flip(debug_frame, 0)
     return flipped
 
-
 def crop_film_frame(frame, anchor, pitch_px=None):
     """
     Crop relative to sprocket anchor:
@@ -194,52 +193,6 @@ detector = SprocketDetector(
 )
 
 last_error = 0 # difference between actual and target for sprocket detection
-
-async def advance_to_next_perforation_old(camera, websocket, step_chunk=None):
-    if step_chunk is None:
-        step_chunk = steps_per_pitch // 2  # 50% pitch
-
-    tracked_cy = None
-
-    while True:
-        # Capture + detect sprockets
-        buffer = io.BytesIO()
-        camera.capture_file(buffer, format='jpeg')
-        lores_bgr = cv2.imdecode(
-            np.frombuffer(buffer.getvalue(), np.uint8),
-            cv2.IMREAD_COLOR
-        )
-        sprockets = detector.detect(lores_bgr, mode="profile")
-
-        if not sprockets:
-            tc.steps_forward(step_chunk)
-            await asyncio.sleep(0.01)
-            continue
-
-        sprockets.sort(key=lambda s: s[1])  # top sprocket
-        cx, cy, *_ = sprockets[0]
-
-        if tracked_cy is None:
-            # First detection: begin tracking
-            tracked_cy = cy
-            print(f"[APP] Tracking first sprocket at cy={cy:.1f}")
-        else:
-            if cy < tracked_cy:
-                # New sprocket rolled in above
-                print(f"[APP] New sprocket at cy={cy:.1f}, replacing old (was {tracked_cy:.1f})")
-                return (cx, cy)
-
-            # Still the same sprocket, update tracking
-            tracked_cy = cy
-
-            # Safety: if sprocket has moved down >1 pitch without new one, accept
-            if cy - tracked_cy > 0.9 * SPROCKET_PITCH_PX:
-                print(f"[APP] Old sprocket moved ~1 pitch, accepting at cy={cy:.1f}")
-                return (cx, cy)
-
-        # Step forward a chunk and try again
-        tc.steps_forward(step_chunk)
-        await asyncio.sleep(0.01)
 
 async def advance_to_next_perforation(camera, websocket, 
                                       target_y=None,
