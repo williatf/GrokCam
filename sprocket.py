@@ -99,7 +99,7 @@ class SprocketDetector:
             cy = (y_top + y_bot) / 2 + roi_offset[1]
 
             # horizontal row near upper 25% of sprocket
-            row_y = int((y_top + 0.25 * (y_bot - y_top))
+            row_y = int(y_top + 0.25 * (y_bot - y_top))
             row_y = max(0, min(H - 1, row_y)) # clamp to frame bounds
             row = gray[row_y, :]
             peak_val = np.max(row)
