@@ -323,7 +323,7 @@ def main():
         "gain": gain,
         "sprocket_pitch_px": float(avg_pitch) if avg_pitch else None,
         "steps_per_pitch": avg_spp,
-        "calibration_resolution": list(FULL_RES)
+        "calibration_resolution": list(FULL_RES),
         "sprocket_area_nominal": nom_area,
         "sprocket_area_min": min_area,
         "sprocket_area_max": max_area
