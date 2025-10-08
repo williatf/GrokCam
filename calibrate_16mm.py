@@ -95,7 +95,7 @@ def measure_steps_per_pitch(camera, tc, detector,
                             step_chunk=STEP_CHUNK, 
                             max_steps=MAX_STEPS_TRACK,
                             target_frac=0.35,  # desired sprocket center fraction (e.g., 0.35 = 35% down from top)
-                            tolerance_px=5,    # acceptable deviation from target
+                            tolerance_px=25,    # acceptable deviation from target
                             k_gain=0.5,        # proportional gain for correction
                             min_step=2,
                             max_step=25):
