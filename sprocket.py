@@ -71,7 +71,7 @@ class SprocketDetector:
         mid_x = W // 2
         column = gray[:, mid_x]
         col_norm = column / 255.0
-        thresh_val = np.max(col_norm) * 0.97
+        thresh_val = np.max(col_norm) * 0.95
         mask_y = np.where(col_norm > thresh_val)[0]
 
         sprockets = []
@@ -102,7 +102,7 @@ class SprocketDetector:
             row_y = int((y_top + y_bot) / 2)
             row = gray[row_y, :]
             peak_val = np.max(row)
-            thresh_row = peak_val * 0.97
+            thresh_row = peak_val * 0.95
 
             # Reject faint bands outright
             if peak_val < 180: #0-255 grayscale
