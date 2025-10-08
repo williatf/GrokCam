@@ -91,57 +91,97 @@ def ensure_two_sprockets(camera, tc, detector, step_chunk=STEP_CHUNK, max_steps=
     return None, [], steps
 
 # -------------------- Measure steps-per-pixel by tracking one sprocket --------------------
-def measure_steps_per_pitch(camera, tc, detector, step_chunk=STEP_CHUNK, max_steps=MAX_STEPS_TRACK):
-    # Capture initial
+def measure_steps_per_pitch(camera, tc, detector,
+                            step_chunk=STEP_CHUNK, 
+                            max_steps=MAX_STEPS_TRACK,
+                            target_frac=0.35,  # desired sprocket center fraction (e.g., 0.35 = 35% down from top)
+                            tolerance_px=5,    # acceptable deviation from target
+                            k_gain=0.5,        # proportional gain for correction
+                            min_step=2,
+                            max_step=25):
+    """
+    Track sprocket motion while dynamically adjusting step size
+    so the sprocket center converges to a target position in the frame.
+    Returns (pitch_px, steps_per_px) or (None, None).
+    """
+    # Capture initial frame and detect sprockets
     req = camera.capture_request()
     frame = req.make_array("main")
     req.release()
-    sprockets = detector.detect(frame, mode="profile")
-    if len(sprockets) < 2:
-        print("[CALIB] Need >=2 sprockets to measure pitch.")
+
+    spro = detector.detect(frame, mode="profile")
+    if len(spro) < 2:
+        print("[CALIB] Need at least two sprockets in view to measure pitch.")
         return None, None
 
-    spro_sorted = sorted(sprockets, key=lambda s: s[1])
-    start = spro_sorted[0]
-    target = spro_sorted[-1]
-    cy_start = start[1]
-    cy_target = target[1]
-    cy_tracked = cy_start
+    # Sort top-to-bottom
+    spro_sorted = sorted(spro, key=lambda s: s[1])
+    top_sprocket = spro_sorted[0]
+    bottom_sprocket = spro_sorted[1]
+
+    cy_start = top_sprocket[1]
+    cy_target = bottom_sprocket[1]
+    pitch_px = cy_target - cy_start
+
+    H = frame.shape[0]
+    target_y = int(H * target_frac)
+    print(f"[CALIB] Target sprocket center set to y={target_y}")
 
     steps_total = 0
-    print(f"[TRACK] Start at {cy_start:.1f}, Target={cy_target:.1f}")
+    last_debug = 0
+    cy_anchor = cy_start
+    cx_anchor = top_sprocket[0]
 
-    while steps_total < max_steps:
-        tc.steps_forward(step_chunk)
-        steps_total += step_chunk
+    print(f"[TRACK] Starting tracking from cy={cy_start:.1f} toward target_y={target_y}")
+
+    while steps_total <= max_steps:
+        # Calculate pixel error from target
+        error_px = target_y - cy_anchor
+        correction = int(error_px * k_gain)
+        correction = max(min(correction, max_step), -max_step)
+        next_step = max(min_step, step_chunk + correction)
+
+        # Step film transport
+        tc.steps_forward(next_step)
+        steps_total += next_step
         time.sleep(0.02)
 
+        # Capture new frame
         req = camera.capture_request()
         frame = req.make_array("main")
         req.release()
+
         spro_after = detector.detect(frame, mode="profile")
         if not spro_after:
-            continue
+            print("[TRACK] Lost sprocket—stop.")
+            break
 
-        # Match to same sprocket (closest in y to last known)
-        sprocket = min(spro_after, key=lambda s: abs(s[1] - cy_tracked))
-        cy_tracked = sprocket[1]
+        # Find closest sprocket horizontally
+        sprocket = min(spro_after, key=lambda s: abs(s[0] - cx_anchor))
+        cx_new, cy_new, w_new, h_new, _ = sprocket
 
-        show_debug(frame, spro_after, title="MeasurePitch")
+        if steps_total - last_debug >= 50:
+            show_debug(frame, spro_after, title="TrackAutoStep")
+            last_debug = steps_total
 
-        print(f"[TRACK] cy_tracked={cy_tracked:.1f}/{cy_target:.1f}, steps={steps_total}")
+        print(f"[TRACK] cy: {cy_anchor:.1f} -> {cy_new:.1f} (err={error_px:+.1f}px, step={next_step})")
+        cy_anchor = cy_new
 
-        if cy_tracked >= cy_target:
-            delta_y = cy_target - cy_start
-            pitch_px = delta_y if delta_y > 0 else None
-            steps_per_px = steps_total / delta_y if delta_y > 0 else None
+        # Exit when within tolerance of target
+        if abs(cy_anchor - target_y) <= tolerance_px:
+            print(f"[TRACK] Target reached at cy={cy_anchor:.1f}, within ±{tolerance_px}px")
+            break
 
-            print(f"[TRACK] Done: pitch={pitch_px:.1f}px, steps={steps_total}, steps/px={steps_per_px:.4f}")
-            return pitch_px, steps_per_px
+    # Final calculation
+    delta_y = cy_anchor - cy_start
+    if delta_y <= 0 or steps_total <= 0:
+        print(f"[TRACK] Invalid track (Δy={delta_y}, steps={steps_total}).")
+        return None, None
 
+    steps_per_px = steps_total / delta_y
+    print(f"[CALIB] Δy={delta_y:.1f}px, steps={steps_total} → steps/px={steps_per_px:.4f}")
 
-    print("[TRACK] Max steps reached, pitch not measured.")
-    return None, None
+    return pitch_px, steps_per_px
 
 def compute_area_bounds(areas):
     """
