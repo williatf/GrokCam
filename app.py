@@ -12,7 +12,7 @@ from sprocket import SprocketDetector
 import socket
 import os
 
-def draw_sprockets_debug(frame, sprockets):
+def draw_sprockets_debug_old(frame, sprockets):
     debug_frame = frame.copy()
     for (cx, cy, w, h, area) in sprockets:
         # Draw rectangle
@@ -33,6 +33,38 @@ def draw_sprockets_debug(frame, sprockets):
         flipped = cv2.flip(debug_frame,0)
 
     return flipped
+
+def draw_sprockets_debug(frame, sprockets):
+    """
+    Draw bounding boxes, centers, and labels for detected sprockets.
+    Always returns a valid flipped debug frame.
+    """
+    debug_frame = frame.copy()
+
+    # draw sprocket boxes if any
+    if sprockets:
+        for (cx, cy, w, h, area) in sprockets:
+            # Draw rectangle
+            x1, y1 = int(cx - w / 2), int(cy - h / 2)
+            x2, y2 = int(cx + w / 2), int(cy + h / 2)
+            cv2.rectangle(debug_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+            # Draw center
+            cv2.circle(debug_frame, (int(cx), int(cy)), 6, (0, 0, 255), -1)
+            print(f"[Crop-Debug] cy is {int(cy)}")
+
+            # Label coordinates
+            cv2.putText(debug_frame, f"cy={cy:.1f}",
+                        (int(cx) + 10, int(cy)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5, (255, 0, 0), 1)
+    else:
+        print("[Crop-Debug] No sprockets detected for debug draw.")
+
+    # always define flipped even if sprockets == []
+    flipped = cv2.flip(debug_frame, 0)
+    return flipped
+
 
 def crop_film_frame(frame, anchor, pitch_px=None):
     """
