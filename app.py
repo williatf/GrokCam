@@ -12,6 +12,7 @@ from control import tcControl
 from sprocket import SprocketDetector
 import socket
 import os
+from collections import deque
 
 async def troubleshoot_sprocket_detection(camera, websocket, tc, detector,
                                           step_size=10, delay=0.05):
@@ -266,7 +267,11 @@ async def advance_to_next_perforation(camera, websocket,
                                       min_step=5,
                                       max_step=None,
                                       smooth_alpha=0.6,
-                                      new_sprocket_min_delta_frac=0.4):
+                                      new_sprocket_min_delta_frac=0.35,
+                                      coarse_step_frac=0.5,
+                                      fine_step_frac=0.1,
+                                      old_presence_tol_frac=0.25,
+                                      fine_history=5):
     """
     Advance film until a new sprocket appears at the top of the image,
     using feedback from detected sprocket position to self-correct
@@ -282,12 +287,20 @@ async def advance_to_next_perforation(camera, websocket,
         frame_H = camera.capture_array("main").shape[0]
         target_y = int(frame_H * 0.35)
 
-    step_chunk = steps_per_pitch // 2  # start with nominal half pitch
-    tracked_cy = None
-    smoothed_cy = None
-    new_sprocket_min_delta = new_sprocket_min_delta_frac * (steps_per_pitch / steps_per_px)
+    pitch_px_est = steps_per_pitch / steps_per_px if steps_per_px else SPROCKET_PITCH_PX
+    new_sprocket_min_delta = new_sprocket_min_delta_frac * pitch_px_est
+    coarse_step = max(min_step, int(steps_per_pitch * coarse_step_frac))
+    fine_step = max(min_step, int(steps_per_pitch * fine_step_frac))
+    coarse_step = max(coarse_step, fine_step)
+    old_presence_tol_px = max(5, int(SPROCKET_PITCH_PX * old_presence_tol_frac))
 
-    print(f"[APP] Adaptive advance: target_y={target_y}, start step_chunk={step_chunk}")
+    smoothed_old_cy = None
+    state = "coarse"
+    old_exit_reference = None
+    new_sprocket_samples = deque(maxlen=fine_history)
+    old_missing_frames = 0
+
+    print(f"[APP] Adaptive advance: target_y={target_y}, coarse_step={coarse_step}, fine_step={fine_step}")
 
     while True:
         # --- capture & detect ---
@@ -295,33 +308,55 @@ async def advance_to_next_perforation(camera, websocket,
         camera.capture_file(buffer, format="jpeg")
         lores_bgr = cv2.imdecode(np.frombuffer(buffer.getvalue(), np.uint8),
                                  cv2.IMREAD_COLOR)
-        sprockets = detector.detect(lores_bgr, mode="profile")
+        sprockets = detector.detect(lores_bgr, mode="profile") or []
 
         if not sprockets:
-            tc.steps_forward(step_chunk)
+            step = fine_step if state == "fine" else coarse_step
+            print(f"[APP] No sprockets detected; stepping {step} and retrying")
+            tc.steps_forward(step)
             await asyncio.sleep(0.01)
             continue
 
         sprockets.sort(key=lambda s: s[1])  # sort top-to-bottom
-        cx, cy, *_ = sprockets[0]
+        top_cx, top_cy, *_ = sprockets[0]
 
-        if tracked_cy is None:
-            tracked_cy = cy
-            smoothed_cy = cy
-            print(f"[APP] Tracking initial sprocket at cy={cy:.1f}")
-        else:
-            # smooth the y position to reduce bounce
-            smoothed_cy = smooth_alpha * cy + (1 - smooth_alpha) * smoothed_cy
+        if smoothed_old_cy is None:
+            smoothed_old_cy = top_cy
+            print(f"[APP] Tracking initial sprocket at cy={smoothed_old_cy:.1f}")
 
-            if smoothed_cy < tracked_cy - new_sprocket_min_delta:
-                # confirmed new sprocket rolled in
-                print(f"[APP] Confirmed new sprocket at cy={smoothed_cy:.1f}, replacing old (was {tracked_cy:.1f})")
+        if state == "coarse":
+            smoothed_old_cy = smooth_alpha * top_cy + (1 - smooth_alpha) * smoothed_old_cy
+            new_candidates = [s for s in sprockets if s[1] < smoothed_old_cy - new_sprocket_min_delta]
+            if new_candidates:
+                state = "fine"
+                old_exit_reference = smoothed_old_cy
+                new_sprocket_samples.clear()
+                new_sprocket_samples.append(new_candidates[0])
+                old_missing_frames = 0
+                print(f"[APP] New sprocket entering: old_ref={old_exit_reference:.1f}, switching to fine steps")
+            else:
+                tc.steps_forward(coarse_step)
+                await asyncio.sleep(0.01)
+                continue
 
-                # feedback correction
-                error_px = target_y - smoothed_cy
+        if state == "fine":
+            new_candidates = [s for s in sprockets if s[1] < old_exit_reference - new_sprocket_min_delta]
+            if new_candidates:
+                new_sprocket_samples.append(min(new_candidates, key=lambda s: s[1]))
+
+            old_present = any(abs(s[1] - old_exit_reference) < old_presence_tol_px for s in sprockets)
+            if not old_present:
+                old_missing_frames += 1
+            else:
+                old_missing_frames = 0
+
+            if old_missing_frames >= 2 and new_sprocket_samples:
+                avg_cx = sum(s[0] for s in new_sprocket_samples) / len(new_sprocket_samples)
+                avg_cy = sum(s[1] for s in new_sprocket_samples) / len(new_sprocket_samples)
+                print(f"[APP] Old sprocket cleared; averaging new sprocket cy={avg_cy:.1f} from {len(new_sprocket_samples)} samples")
+
+                error_px = target_y - avg_cy
                 correction = int(error_px * steps_per_px * k_gain)
-
-                # clamp correction magnitude
                 max_corr = int(0.15 * steps_per_pitch)
                 correction = max(min(correction, max_corr), -max_corr)
 
@@ -331,12 +366,15 @@ async def advance_to_next_perforation(camera, websocket,
                 print(f"[APP] Correction: error={error_px:+.1f}px → adjust {correction:+d} steps")
                 print(f"[APP] Updated nominal pitch for next advance: {new_nominal} steps")
 
-                return (cx, smoothed_cy, new_nominal)
+                return (avg_cx, avg_cy, new_nominal)
 
-            tracked_cy = smoothed_cy
+            step = fine_step
+            tc.steps_forward(step)
+            await asyncio.sleep(0.01)
+            continue
 
-        # --- move forward and retry ---
-        tc.steps_forward(step_chunk)
+        # Safety net: if somehow we fall through without returning, nudge forward conservatively.
+        tc.steps_forward(fine_step)
         await asyncio.sleep(0.01)
 
 
