@@ -273,7 +273,8 @@ async def advance_to_next_perforation(camera,
                                       initial_step=20,
                                       old_track_tol_frac=0.25,
                                       old_missing_required=2,
-                                      min_new_samples=3):
+                                      min_new_samples=3,
+                                      acceptance_tol_frac=0.1):
     """
     Advance film until a new sprocket appears at the top of the image,
     using feedback from detected sprocket position to self-correct
@@ -301,6 +302,7 @@ async def advance_to_next_perforation(camera,
     old_track_tol_px = max(5, int(SPROCKET_PITCH_PX * old_track_tol_frac))
     last_seen_cx = 0
     last_seen_cy = target_y
+    acceptance_tol_px = max(10, int(SPROCKET_PITCH_PX * acceptance_tol_frac))
 
     print(f"[APP] Adaptive advance: target_y={target_y}, step_small={step_small}, max_step={max_step}")
 
@@ -338,12 +340,10 @@ async def advance_to_next_perforation(camera,
                     new_candidates = []
 
                 if old_missing_frames == 0 and new_candidates:
-                    # Old still present but new is visible; record sample for later averaging.
                     chosen = min(new_candidates, key=lambda s: s[1])
                     new_sprocket_samples.append(chosen)
                     print(f"[APP] New sprocket sample cy={chosen[1]:.1f} (samples={len(new_sprocket_samples)})")
                 elif old_missing_frames > 0:
-                    # Old is gone (or we think it is); fall back to top sprocket if no candidate above old reference.
                     if new_candidates:
                         chosen = min(new_candidates, key=lambda s: s[1])
                     else:
@@ -351,27 +351,33 @@ async def advance_to_next_perforation(camera,
                     new_sprocket_samples.append(chosen)
                     print(f"[APP] New sprocket post-old sample cy={chosen[1]:.1f} (samples={len(new_sprocket_samples)})")
 
-                ready = old_missing_frames >= old_missing_required
-                if not ready and total_steps >= int(steps_per_pitch * 0.8):
-                    ready = len(new_sprocket_samples) >= min_new_samples
-
-                if ready and len(new_sprocket_samples) >= min_new_samples:
+                if len(new_sprocket_samples) >= min_new_samples:
                     avg_cx = sum(s[0] for s in new_sprocket_samples) / len(new_sprocket_samples)
                     avg_cy = sum(s[1] for s in new_sprocket_samples) / len(new_sprocket_samples)
-                    print(f"[APP] Sprocket handoff after {total_steps} steps; new sprocket cy={avg_cy:.1f}")
 
-                    error_px = target_y - avg_cy
-                    correction = int(error_px * steps_per_px * k_gain)
-                    max_corr = int(0.15 * steps_per_pitch)
-                    correction = max(min(correction, max_corr), -max_corr)
+                    acceptable_position = abs(avg_cy - target_y) <= acceptance_tol_px
 
-                    new_nominal = total_steps + correction
-                    new_nominal = max(min(new_nominal, max_step), min_step)
+                    ready = old_missing_frames >= old_missing_required
+                    if not ready and total_steps >= int(steps_per_pitch * 0.8):
+                        ready = True
+                    if not ready and acceptable_position:
+                        ready = True
 
-                    print(f"[APP] Correction: error={error_px:+.1f}px → adjust {correction:+d} steps")
-                    print(f"[APP] Updated nominal pitch for next advance: {new_nominal} steps (total_steps={total_steps})")
+                    if ready:
+                        print(f"[APP] Sprocket handoff after {total_steps} steps; new sprocket cy={avg_cy:.1f} (acceptable={acceptable_position})")
 
-                    return (avg_cx, avg_cy, new_nominal)
+                        error_px = target_y - avg_cy
+                        correction = int(error_px * steps_per_px * k_gain)
+                        max_corr = int(0.15 * steps_per_pitch)
+                        correction = max(min(correction, max_corr), -max_corr)
+
+                        new_nominal = total_steps + correction
+                        new_nominal = max(min(new_nominal, max_step), min_step)
+
+                        print(f"[APP] Correction: error={error_px:+.1f}px → adjust {correction:+d} steps")
+                        print(f"[APP] Updated nominal pitch for next advance: {new_nominal} steps (total_steps={total_steps})")
+
+                        return (avg_cx, avg_cy, new_nominal)
 
         else:
             print(f"[APP] No sprockets detected in frame; continuing with small steps.")
