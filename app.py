@@ -471,6 +471,10 @@ async def handle_client(websocket):
             finally:
                 cv2.destroyWindow("Focus Preview")
 
+        if data.get("event") == "troubleshoot_start":
+            await troubleshoot_sprocket_detection(camera, websocket, tc, detector)
+            continue
+
         elif data.get('event') == "focus_stop":
             self_focus = False
             tc.light_off()
