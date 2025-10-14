@@ -440,7 +440,13 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
 
             timestamp = int(time.time() * 1000)
             filename = os.path.join(SAVE_DIR, f"frame_{timestamp}.png")
-            cv2.imwrite(filename, frame_cropped)  # PNG = lossless
+            save_ok = cv2.imwrite(filename, frame_cropped)  # PNG = lossless
+            if not save_ok:
+                print(f"[APP] WARNING: Failed to save cropped frame to {filename}")
+                await websocket.send(json.dumps({
+                    'event': 'warning',
+                    'message': f'Failed to save frame {frame} to disk'
+                }))
 
             scale_w = max(1, int(preview_width))
             scale_h = int(frame_cropped.shape[0] * (scale_w / frame_cropped.shape[1]))
@@ -461,7 +467,10 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
             payload = header + cropped_bytes + debug_bytes
             await websocket.send(payload)
 
-            print(f"[APP] Sent frame {frame} → saved cropped {filename}")
+            if save_ok:
+                print(f"[APP] Sent frame {frame} → saved cropped {filename}")
+            else:
+                print(f"[APP] Sent frame {frame} → no disk save")
             await asyncio.sleep(0.1)
 
         await websocket.send(json.dumps({'event': 'capture_complete'}))
