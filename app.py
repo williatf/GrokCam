@@ -60,6 +60,12 @@ async def troubleshoot_sprocket_detection(camera, websocket, tc, detector,
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
             dbg = cv2.flip(dbg, 0)
 
+            debug_scale = float(data.get("debug_scale", 1.0))
+            if debug_scale != 1.0:
+                dbg_w = max(1, int(dbg.shape[1] * debug_scale))
+                dbg_h = max(1, int(dbg.shape[0] * debug_scale))
+                dbg = cv2.resize(dbg, (dbg_w, dbg_h), interpolation=cv2.INTER_LINEAR)
+
             # --- send to client ---
             ok, jpg = cv2.imencode(".jpg", dbg)
             if ok:
@@ -330,7 +336,7 @@ async def advance_to_next_perforation(camera, websocket,
 SAVE_DIR = "/media/williatf/SG1TB/GrokCam/testframes"
 os.makedirs(SAVE_DIR, exist_ok=True)
 
-async def run_capture(websocket, num_frames, stop_event):
+async def run_capture(websocket, num_frames, stop_event, preview_width=800, debug_scale=1.0):
     print("[APP] Capture task starting")
     tc.light_on()
     camera.start()
@@ -374,14 +380,22 @@ async def run_capture(websocket, num_frames, stop_event):
             filename = os.path.join(SAVE_DIR, f"frame_{timestamp}.png")
             cv2.imwrite(filename, frame_cropped)  # PNG = lossless
 
-            scale_w = 800
+            scale_w = max(1, int(preview_width))
             scale_h = int(frame_cropped.shape[0] * (scale_w / frame_cropped.shape[1]))
             frame_lowres = cv2.resize(frame_cropped, (scale_w, scale_h), interpolation=cv2.INTER_AREA)
 
-            _, cropped_bytes = await encode_frame_async(frame_lowres, frame)
-            _, debug_bytes = await encode_frame_async(debug_frame, frame)
+            if debug_scale != 1.0:
+                dbg_scale = max(0.1, float(debug_scale))
+                dbg_w = int(debug_frame.shape[1] * dbg_scale)
+                dbg_h = int(debug_frame.shape[0] * dbg_scale)
+                debug_frame_resized = cv2.resize(debug_frame, (dbg_w, dbg_h), interpolation=cv2.INTER_NEAREST)
+            else:
+                debug_frame_resized = debug_frame
 
-            header = len(cropped_bytes).to_bytes(4, 'big')  # 4-byte size for first image
+            _, cropped_bytes = await encode_frame_async(frame_lowres, frame)
+            _, debug_bytes = await encode_frame_async(debug_frame_resized, frame)
+
+            header = len(cropped_bytes).to_bytes(4, 'big')
             payload = header + cropped_bytes + debug_bytes
             await websocket.send(payload)
 
@@ -481,8 +495,18 @@ async def handle_client(websocket):
                 }))
                 continue
             num_frames = data.get('num_frames', 100)
+            preview_width = data.get('preview_width', 800)
+            debug_scale = data.get('debug_scale', 1.0)
             capture_stop_event = asyncio.Event()
-            capture_task = asyncio.create_task(run_capture(websocket, num_frames, capture_stop_event))
+            capture_task = asyncio.create_task(
+                run_capture(
+                    websocket,
+                    num_frames,
+                    capture_stop_event,
+                    preview_width=preview_width,
+                    debug_scale=debug_scale
+                )
+            )
             continue
 
         elif event == 'stop_capture':
