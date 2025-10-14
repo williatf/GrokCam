@@ -60,7 +60,7 @@ async def troubleshoot_sprocket_detection(camera, websocket, tc, detector,
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
             dbg = cv2.flip(dbg, 0)
 
-            debug_scale = float(data.get("debug_scale", 2.0))
+            debug_scale = float(data.get("debug_scale", 1.0))
             if debug_scale != 1.0:
                 dbg_w = max(1, int(dbg.shape[1] * debug_scale))
                 dbg_h = max(1, int(dbg.shape[0] * debug_scale))
@@ -70,6 +70,7 @@ async def troubleshoot_sprocket_detection(camera, websocket, tc, detector,
             # --- send to client ---
             ok, jpg = cv2.imencode(".jpg", dbg)
             print(f"[TROUBLE] Encoded debug length: {len(jpg.tobytes())} bytes")
+            print(f"[TROUBLE] Encoded debug size: {jpg.shape[1]}x{jpg.shape[0]}")
             if ok:
                 header = json.dumps({
                     "event": "troubleshoot_frame",
