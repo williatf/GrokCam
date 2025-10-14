@@ -270,7 +270,7 @@ async def advance_to_next_perforation(camera,
                                       smooth_alpha=0.6,
                                       new_sprocket_min_delta_frac=0.35,
                                       fine_history=5,
-                                      initial_step=20,
+                                      initial_step=50,
                                       old_track_tol_frac=0.25,
                                       old_missing_required=2,
                                       min_new_samples=3,
@@ -472,6 +472,8 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
             header = len(cropped_bytes).to_bytes(4, 'big')
             payload = header + cropped_bytes + debug_bytes
             await websocket.send(payload)
+            print(f"[APP] Frame {frame}: sent {len(payload)} bytes to client")
+
 
             if save_ok:
                 print(f"[APP] Sent frame {frame} → saved cropped {filename}")
