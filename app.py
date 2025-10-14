@@ -412,10 +412,17 @@ async def run_focus(websocket, stop_event):
             cv2.imshow("Focus Preview", frame_bgr)
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 print("[APP] Focus task received local quit")
+                stop_event.set()
                 break
             await asyncio.sleep(0.05)
     finally:
-        cv2.destroyWindow("Focus Preview")
+        try:
+            cv2.destroyWindow("Focus Preview")
+            cv2.waitKey(1)  # ensure UI thread processes destroy
+        except cv2.error as err:
+            print(f"[APP] Focus destroy warning: {err}")
+        cv2.destroyAllWindows()
+        cv2.waitKey(1)
         tc.light_off()
         camera.stop()
         await websocket.send(json.dumps({
