@@ -259,7 +259,8 @@ detector = SprocketDetector(
 
 last_error = 0 # difference between actual and target for sprocket detection
 
-async def advance_to_next_perforation(camera, websocket, 
+async def advance_to_next_perforation(camera,
+                                      websocket, 
                                       target_y=None,
                                       steps_per_pitch=None,
                                       steps_per_px=None,
@@ -350,10 +351,14 @@ async def advance_to_next_perforation(camera, websocket,
                     new_sprocket_samples.append(chosen)
                     print(f"[APP] New sprocket post-old sample cy={chosen[1]:.1f} (samples={len(new_sprocket_samples)})")
 
-                if old_missing_frames >= old_missing_required and len(new_sprocket_samples) >= min_new_samples:
+                ready = old_missing_frames >= old_missing_required
+                if not ready and total_steps >= int(steps_per_pitch * 0.8):
+                    ready = len(new_sprocket_samples) >= min_new_samples
+
+                if ready and len(new_sprocket_samples) >= min_new_samples:
                     avg_cx = sum(s[0] for s in new_sprocket_samples) / len(new_sprocket_samples)
                     avg_cy = sum(s[1] for s in new_sprocket_samples) / len(new_sprocket_samples)
-                    print(f"[APP] Old sprocket cleared after {total_steps} steps; new sprocket cy={avg_cy:.1f}")
+                    print(f"[APP] Sprocket handoff after {total_steps} steps; new sprocket cy={avg_cy:.1f}")
 
                     error_px = target_y - avg_cy
                     correction = int(error_px * steps_per_px * k_gain)
@@ -393,6 +398,9 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
     try:
         await asyncio.sleep(2)
 
+        current_steps_per_pitch = settings.get("steps_per_pitch", 280)
+        current_steps_per_px = settings.get("steps_per_px", steps_per_px)
+
         for frame in range(num_frames):
             if stop_event.is_set():
                 print("[APP] Stop requested, leaving capture loop")
@@ -401,8 +409,8 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
             advance_result = await advance_to_next_perforation(
                 camera,
                 websocket,
-                steps_per_pitch=settings.get("steps_per_pitch", 280),
-                steps_per_px=settings.get("steps_per_px", 0.5)
+                steps_per_pitch=current_steps_per_pitch,
+                steps_per_px=current_steps_per_px
             )
             if not advance_result:
                 await websocket.send(json.dumps({
@@ -410,6 +418,11 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
                     'message': f'Failed to align frame {frame}'
                 }))
                 break
+            anchor_cx, anchor_cy, new_nominal = advance_result
+            if new_nominal:
+                current_steps_per_pitch = new_nominal
+                current_steps_per_px = current_steps_per_pitch / SPROCKET_PITCH_PX
+                print(f"[APP] Updated steps_per_pitch for next frame: {current_steps_per_pitch}")
 
             buffer = io.BytesIO()
             camera.capture_file(buffer, format='jpeg')
