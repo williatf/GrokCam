@@ -65,6 +65,7 @@ async def troubleshoot_sprocket_detection(camera, websocket, tc, detector,
                 dbg_w = max(1, int(dbg.shape[1] * debug_scale))
                 dbg_h = max(1, int(dbg.shape[0] * debug_scale))
                 dbg = cv2.resize(dbg, (dbg_w, dbg_h), interpolation=cv2.INTER_LINEAR)
+            print(f"[TROUBLE] Frame {frame_counter} debug size: {dbg.shape[1]}x{dbg.shape[0]}")
 
             # --- send to client ---
             ok, jpg = cv2.imencode(".jpg", dbg)
