@@ -330,88 +330,183 @@ async def advance_to_next_perforation(camera, websocket,
 SAVE_DIR = "/media/williatf/SG1TB/GrokCam/testframes"
 os.makedirs(SAVE_DIR, exist_ok=True)
 
+async def run_capture(websocket, num_frames, stop_event):
+    print("[APP] Capture task starting")
+    tc.light_on()
+    camera.start()
+    print("[APP] LED on + camera, stabilizing...")
+    try:
+        await asyncio.sleep(2)
+
+        for frame in range(num_frames):
+            if stop_event.is_set():
+                print("[APP] Stop requested, leaving capture loop")
+                break
+
+            advance_result = await advance_to_next_perforation(
+                camera,
+                websocket,
+                steps_per_pitch=settings.get("steps_per_pitch", 280),
+                steps_per_px=settings.get("steps_per_px", 0.5)
+            )
+            if not advance_result:
+                await websocket.send(json.dumps({
+                    'event': 'error',
+                    'message': f'Failed to align frame {frame}'
+                }))
+                break
+
+            buffer = io.BytesIO()
+            camera.capture_file(buffer, format='jpeg')
+            buffer.seek(0)
+            frame_bgr = cv2.imdecode(
+                np.frombuffer(buffer.getvalue(), np.uint8),
+                cv2.IMREAD_COLOR
+            )
+
+            sprockets = detector.detect(frame_bgr, mode="profile")
+            debug_frame = draw_sprockets_debug(frame_bgr, sprockets if sprockets else [])
+            frame_cropped = crop_film_frame(
+                frame_bgr, sprockets[0] if sprockets else None, SPROCKET_PITCH_PX
+            )
+
+            timestamp = int(time.time() * 1000)
+            filename = os.path.join(SAVE_DIR, f"frame_{timestamp}.png")
+            cv2.imwrite(filename, frame_cropped)  # PNG = lossless
+
+            scale_w = 800
+            scale_h = int(frame_cropped.shape[0] * (scale_w / frame_cropped.shape[1]))
+            frame_lowres = cv2.resize(frame_cropped, (scale_w, scale_h), interpolation=cv2.INTER_AREA)
+
+            _, cropped_bytes = await encode_frame_async(frame_lowres, frame)
+            _, debug_bytes = await encode_frame_async(debug_frame, frame)
+
+            header = len(cropped_bytes).to_bytes(4, 'big')  # 4-byte size for first image
+            payload = header + cropped_bytes + debug_bytes
+            await websocket.send(payload)
+
+            print(f"[APP] Sent frame {frame} → saved cropped {filename}")
+            await asyncio.sleep(0.1)
+
+        await websocket.send(json.dumps({'event': 'capture_complete'}))
+    finally:
+        tc.clean_up()
+        camera.stop()
+        print("[APP] Capture task cleaned up")
+
+async def run_focus(websocket, stop_event):
+    print("[APP] Focus task starting")
+    tc.light_on()
+    camera.start()
+    print("[APP] LED on + camera for focus")
+    try:
+        await websocket.send(json.dumps({
+            'event': 'info',
+            'message': 'Focus mode started'
+        }))
+        while not stop_event.is_set():
+            buffer = io.BytesIO()
+            camera.capture_file(buffer, format='jpeg')
+            frame_bgr = cv2.imdecode(np.frombuffer(buffer.getvalue(), np.uint8), cv2.IMREAD_COLOR)
+
+            cv2.imshow("Focus Preview", frame_bgr)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                print("[APP] Focus task received local quit")
+                break
+            await asyncio.sleep(0.05)
+    finally:
+        cv2.destroyWindow("Focus Preview")
+        tc.light_off()
+        camera.stop()
+        await websocket.send(json.dumps({
+            'event': 'info',
+            'message': 'Focus mode stopped'
+        }))
+        print("[APP] Focus task cleaned up")
+
 async def handle_client(websocket):
     print("Client connected")
-    stop_requested = False
+    capture_task = None
+    capture_stop_event = None
+    focus_task = None
+    focus_stop_event = None
     async for message in websocket:
         print(f"[APP] Got message: {message}")
         data = json.loads(message)
 
-        if data.get('event') == 'start_capture':
+        if capture_task and capture_task.done():
+            try:
+                capture_task.result()
+            except Exception as exc:
+                print(f"[APP] Capture task error: {exc}")
+                await websocket.send(json.dumps({
+                    'event': 'error',
+                    'message': 'Capture task failed'
+                }))
+            capture_task = None
+            capture_stop_event = None
+
+        if focus_task and focus_task.done():
+            try:
+                focus_task.result()
+            except Exception as exc:
+                print(f"[APP] Focus task error: {exc}")
+                await websocket.send(json.dumps({
+                    'event': 'error',
+                    'message': 'Focus task failed'
+                }))
+            focus_task = None
+            focus_stop_event = None
+
+        event = data.get('event')
+
+        if event == 'start_capture':
+            if capture_task and not capture_task.done():
+                await websocket.send(json.dumps({
+                    'event': 'error',
+                    'message': 'Capture already running'
+                }))
+                continue
+            if focus_task and not focus_task.done():
+                await websocket.send(json.dumps({
+                    'event': 'error',
+                    'message': 'Cannot start capture while focus is active'
+                }))
+                continue
             num_frames = data.get('num_frames', 100)
-            tc.light_on()
-            camera.start()
-            print("[APP] LED on + camera, stabilizing...")
-            await asyncio.sleep(2)
-
-            for frame in range(num_frames):
-                if stop_requested:
-                    break
-                anchor = await advance_to_next_perforation(camera, websocket,
-                    steps_per_pitch = settings.get("steps_per_pitch", 280), 
-                    steps_per_px = settings.get("steps_per_px", 0.5))
-                if not anchor:
-                    await websocket.send(json.dumps({
-                        'event': 'error',
-                        'message': f'Failed to align frame {frame}'
-                    }))
-                    break
-
-                # --- Capture full frame ---
-                buffer = io.BytesIO()
-                camera.capture_file(buffer, format='jpeg')
-                buffer.seek(0)
-                frame_bgr = cv2.imdecode(
-                    np.frombuffer(buffer.getvalue(), np.uint8),
-                    cv2.IMREAD_COLOR
-                )
-
-                # --- Detect sprockets + crop film frame ---
-                sprockets = detector.detect(frame_bgr, mode="profile")
-                debug_frame = draw_sprockets_debug(frame_bgr, sprockets if sprockets else [])
-                frame_cropped = crop_film_frame(
-                    frame_bgr, sprockets[0] if sprockets else None, SPROCKET_PITCH_PX
-                )
-
-                # --- Save cropped (hi-res, lossless) to disk ---
-                timestamp = int(time.time() * 1000)
-                filename = os.path.join(SAVE_DIR, f"frame_{timestamp}.png")
-                cv2.imwrite(filename, frame_cropped)  # PNG = lossless
-
-                # --- Downscale cropped for sending to client ---
-                scale_w = 800
-                scale_h = int(frame_cropped.shape[0] * (scale_w / frame_cropped.shape[1]))
-                frame_lowres = cv2.resize(frame_cropped, (scale_w, scale_h), interpolation=cv2.INTER_AREA)
-
-                # --- Encode (low-res + debug) for client ---
-                _, cropped_bytes = await encode_frame_async(frame_lowres, frame)
-                _, debug_bytes = await encode_frame_async(debug_frame, frame)
-
-                header = len(cropped_bytes).to_bytes(4, 'big')  # 4-byte size for first image
-                payload = header + cropped_bytes + debug_bytes
-                await websocket.send(payload)
-
-                print(f"[APP] Sent frame {frame} → saved cropped {filename}")
-
-                await asyncio.sleep(0.1)
-
-            await websocket.send(json.dumps({'event': 'capture_complete'}))
-            tc.clean_up()
-            camera.stop()
-
-
-        if data.get('event') == 'stop_capture':
-            print("[APP] Stop requested")
-            stop_requested = True
-            await websocket.send(json.dumps({
-                'event': 'info',
-                'message': 'Stop requested'
-            }))
+            capture_stop_event = asyncio.Event()
+            capture_task = asyncio.create_task(run_capture(websocket, num_frames, capture_stop_event))
             continue
 
-        if data.get('event') == 'jog_forward' or data.get('event') == 'jog_back':
+        elif event == 'stop_capture':
+            if capture_task and not capture_task.done():
+                print("[APP] Stop requested")
+                capture_stop_event.set()
+                await websocket.send(json.dumps({
+                    'event': 'info',
+                    'message': 'Stop requested'
+                }))
+                try:
+                    await capture_task
+                finally:
+                    capture_task = None
+                    capture_stop_event = None
+            else:
+                await websocket.send(json.dumps({
+                    'event': 'info',
+                    'message': 'No active capture task'
+                }))
+            continue
+
+        elif event == 'jog_forward' or event == 'jog_back':
+            if capture_task and not capture_task.done():
+                await websocket.send(json.dumps({
+                    'event': 'error',
+                    'message': 'Cannot jog while capture is running'
+                }))
+                continue
             frames = int(data.get("frames", 1))
-            direction = 1 if data.get('event') == "jog_forward" else -1
+            direction = 1 if event == "jog_forward" else -1
             tc.light_on()
             camera.start()
             print("[APP] LED on + camera, stabilizing...")
@@ -453,33 +548,49 @@ async def handle_client(websocket):
             tc.clean_up()
             camera.stop()
 
-        if data.get('event') == 'focus_start':
-            tc.light_on()
-            camera.start()
-            self_focus = True
-            print("[APP] Focus mode started")
-            try:
-                while self_focus:
-                    buffer = io.BytesIO()
-                    camera.capture_file(buffer, format='jpeg')
-                    frame_bgr = cv2.imdecode(np.frombuffer(buffer.getvalue(), np.uint8), cv2.IMREAD_COLOR)
+        elif event == 'focus_start':
+            if focus_task and not focus_task.done():
+                await websocket.send(json.dumps({
+                    'event': 'info',
+                    'message': 'Focus already active'
+                }))
+                continue
+            if capture_task and not capture_task.done():
+                await websocket.send(json.dumps({
+                    'event': 'error',
+                    'message': 'Cannot start focus during capture'
+                }))
+                continue
+            focus_stop_event = asyncio.Event()
+            focus_task = asyncio.create_task(run_focus(websocket, focus_stop_event))
+            continue
 
-                    cv2.imshow("Focus Preview", frame_bgr)
-                    if cv2.waitKey(1) & 0xFF == ord('q'):
-                        break
-                    await asyncio.sleep(0.05)
-            finally:
-                cv2.destroyWindow("Focus Preview")
-
-        if data.get("event") == "troubleshoot_start":
+        elif event == "troubleshoot_start":
+            if capture_task and not capture_task.done():
+                await websocket.send(json.dumps({
+                    'event': 'error',
+                    'message': 'Cannot troubleshoot while capture is running'
+                }))
+                continue
             await troubleshoot_sprocket_detection(camera, websocket, tc, detector)
             continue
 
-        elif data.get('event') == "focus_stop":
-            self_focus = False
-            tc.light_off()
-            camera.stop()
-            print("[APP] Focus mode stopped")
+        elif event == "focus_stop":
+            if focus_task and not focus_task.done():
+                focus_stop_event.set()
+                try:
+                    await focus_task
+                finally:
+                    focus_task = None
+                    focus_stop_event = None
+            else:
+                await websocket.send(json.dumps({
+                    'event': 'info',
+                    'message': 'Focus not active'
+                }))
+
+        else:
+            print(f"[APP] Unrecognized event: {event}")
 
 async def main():
     print("Starting WebSocket server on ws://0.0.0.0:5000")
