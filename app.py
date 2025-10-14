@@ -70,7 +70,7 @@ async def troubleshoot_sprocket_detection(camera, websocket, tc, detector,
             # --- send to client ---
             ok, jpg = cv2.imencode(".jpg", dbg)
             print(f"[TROUBLE] Encoded debug length: {len(jpg.tobytes())} bytes")
-            print(f"[TROUBLE] Encoded debug size: {jpg.shape[1]}x{jpg.shape[0]}")
+            print(f"[TROUBLE] Encoded debug shape: {jpg.shape}")
             if ok:
                 header = json.dumps({
                     "event": "troubleshoot_frame",
