@@ -271,7 +271,10 @@ async def advance_to_next_perforation(camera, websocket,
                                       coarse_step_frac=0.5,
                                       fine_step_frac=0.1,
                                       old_presence_tol_frac=0.25,
-                                      fine_history=5):
+                                      fine_history=5,
+                                      initial_step=20,
+                                      old_track_tol_frac=0.25,
+                                      old_missing_required=2):
     """
     Advance film until a new sprocket appears at the top of the image,
     using feedback from detected sprocket position to self-correct
@@ -295,12 +298,16 @@ async def advance_to_next_perforation(camera, websocket,
     old_presence_tol_px = max(5, int(SPROCKET_PITCH_PX * old_presence_tol_frac))
 
     smoothed_old_cy = None
-    state = "coarse"
-    old_exit_reference = None
+    old_reference = None
     new_sprocket_samples = deque(maxlen=fine_history)
     old_missing_frames = 0
+    total_steps = 0
+    step_small = max(min_step, int(initial_step))
+    old_track_tol_px = max(5, int(SPROCKET_PITCH_PX * old_track_tol_frac))
+    last_seen_cx = 0
+    last_seen_cy = target_y
 
-    print(f"[APP] Adaptive advance: target_y={target_y}, coarse_step={coarse_step}, fine_step={fine_step}")
+    print(f"[APP] Adaptive advance: target_y={target_y}, step_small={step_small}, max_step={max_step}")
 
     while True:
         # --- capture & detect ---
@@ -311,71 +318,76 @@ async def advance_to_next_perforation(camera, websocket,
         sprockets = detector.detect(lores_bgr, mode="profile") or []
 
         if not sprockets:
-            step = fine_step if state == "fine" else coarse_step
-            print(f"[APP] No sprockets detected; stepping {step} and retrying")
-            tc.steps_forward(step)
+            tc.steps_forward(step_small)
+            total_steps += step_small
+            print(f"[APP] No sprockets detected; stepped {step_small}, total={total_steps}")
             await asyncio.sleep(0.01)
-            continue
+        else:
+            sprockets.sort(key=lambda s: s[1])  # sort top-to-bottom
+            top_cx, top_cy, *_ = sprockets[0]
+            last_seen_cx, last_seen_cy = top_cx, top_cy
 
-        sprockets.sort(key=lambda s: s[1])  # sort top-to-bottom
-        top_cx, top_cy, *_ = sprockets[0]
-
-        if smoothed_old_cy is None:
-            smoothed_old_cy = top_cy
-            print(f"[APP] Tracking initial sprocket at cy={smoothed_old_cy:.1f}")
-
-        if state == "coarse":
-            smoothed_old_cy = smooth_alpha * top_cy + (1 - smooth_alpha) * smoothed_old_cy
-            new_candidates = [s for s in sprockets if s[1] < smoothed_old_cy - new_sprocket_min_delta]
-            if new_candidates:
-                state = "fine"
-                old_exit_reference = smoothed_old_cy
-                new_sprocket_samples.clear()
-                new_sprocket_samples.append(new_candidates[0])
-                old_missing_frames = 0
-                print(f"[APP] New sprocket entering: old_ref={old_exit_reference:.1f}, switching to fine steps")
-            else:
-                tc.steps_forward(coarse_step)
+            if smoothed_old_cy is None:
+                smoothed_old_cy = top_cy
+                old_reference = top_cy
+                print(f"[APP] Tracking initial sprocket at cy={smoothed_old_cy:.1f}")
+                tc.steps_forward(step_small)
+                total_steps += step_small
                 await asyncio.sleep(0.01)
                 continue
 
-        if state == "fine":
-            new_candidates = [s for s in sprockets if s[1] < old_exit_reference - new_sprocket_min_delta]
-            if new_candidates:
-                new_sprocket_samples.append(min(new_candidates, key=lambda s: s[1]))
+            # Track previous sprocket if still visible
+            old_candidate = min(sprockets, key=lambda s: abs(s[1] - smoothed_old_cy))
+            if abs(old_candidate[1] - smoothed_old_cy) < old_track_tol_px:
+                smoothed_old_cy = smooth_alpha * old_candidate[1] + (1 - smooth_alpha) * smoothed_old_cy
+                old_reference = smoothed_old_cy
+                old_present = True
+            else:
+                old_present = False
 
-            old_present = any(abs(s[1] - old_exit_reference) < old_presence_tol_px for s in sprockets)
+            # Gather new sprocket samples when they appear above old reference
+            new_candidates = [s for s in sprockets if old_reference is not None and s[1] < old_reference - new_sprocket_min_delta]
+            if not old_present and not new_candidates and sprockets:
+                # Old sprocket gone, take the top sprocket as provisional new sample
+                new_candidates = [sprockets[0]]
+
+            if new_candidates:
+                chosen = min(new_candidates, key=lambda s: s[1])
+                new_sprocket_samples.append(chosen)
+                print(f"[APP] New sprocket sample cy={chosen[1]:.1f} (samples={len(new_sprocket_samples)})")
+
             if not old_present:
                 old_missing_frames += 1
             else:
                 old_missing_frames = 0
 
-            if old_missing_frames >= 2 and new_sprocket_samples:
+            if old_missing_frames >= old_missing_required and new_sprocket_samples:
                 avg_cx = sum(s[0] for s in new_sprocket_samples) / len(new_sprocket_samples)
                 avg_cy = sum(s[1] for s in new_sprocket_samples) / len(new_sprocket_samples)
-                print(f"[APP] Old sprocket cleared; averaging new sprocket cy={avg_cy:.1f} from {len(new_sprocket_samples)} samples")
+                print(f"[APP] Old sprocket cleared after {total_steps} steps; new sprocket cy={avg_cy:.1f}")
 
                 error_px = target_y - avg_cy
                 correction = int(error_px * steps_per_px * k_gain)
                 max_corr = int(0.15 * steps_per_pitch)
                 correction = max(min(correction, max_corr), -max_corr)
 
-                new_nominal = steps_per_pitch + correction
+                new_nominal = total_steps + correction
                 new_nominal = max(min(new_nominal, max_step), min_step)
 
                 print(f"[APP] Correction: error={error_px:+.1f}px → adjust {correction:+d} steps")
-                print(f"[APP] Updated nominal pitch for next advance: {new_nominal} steps")
+                print(f"[APP] Updated nominal pitch for next advance: {new_nominal} steps (total_steps={total_steps})")
 
                 return (avg_cx, avg_cy, new_nominal)
 
-            step = fine_step
-            tc.steps_forward(step)
+            tc.steps_forward(step_small)
+            total_steps += step_small
             await asyncio.sleep(0.01)
-            continue
 
-        # Safety net: if somehow we fall through without returning, nudge forward conservatively.
-        tc.steps_forward(fine_step)
-        await asyncio.sleep(0.01)
+        if total_steps >= max_step:
+            print(f"[APP] Reached max_step {max_step} without confident sprocket handoff; returning fallback.")
+            fallback_cx = last_seen_cx
+            fallback_cy = last_seen_cy
+            return (fallback_cx, fallback_cy, steps_per_pitch)
 
 
 SAVE_DIR = "/media/williatf/SG1TB/GrokCam/testframes"
