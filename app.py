@@ -12,27 +12,78 @@ from sprocket import SprocketDetector
 import socket
 import os
 
-def draw_sprockets_debug_old(frame, sprockets):
-    debug_frame = frame.copy()
-    for (cx, cy, w, h, area) in sprockets:
-        # Draw rectangle
-        x1, y1 = int(cx - w/2), int(cy - h/2)
-        x2, y2 = int(cx + w/2), int(cy + h/2)
-        cv2.rectangle(debug_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+async def troubleshoot_sprocket_detection(camera, websocket, tc, detector,
+                                          step_size=10, delay=0.05):
+    """
+    Bi-directional sprocket troubleshooting loop.
+    The client can send:
+      - {"event": "next_step"} → move + capture + send debug frame
+      - {"event": "stop_troubleshoot"} → exit loop
+    """
+    print("[TROUBLE] Entering interactive sprocket troubleshooting mode")
 
-        # Draw center
-        cv2.circle(debug_frame, (int(cx), int(cy)), 6, (0, 0, 255), -1)
-        print(f"[Crop-Debug] cy is {int(cy)}")
+    active = True
+    frame_counter = 0
 
-        # Label coordinates
-        cv2.putText(debug_frame, f"cy={cy:.1f}",
-                    (int(cx) + 10, int(cy)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5, (255, 0, 0), 1)
+    # ensure lighting and camera are on
+    tc.light_on()
+    camera.start()
+    await asyncio.sleep(0.5)
 
-        flipped = cv2.flip(debug_frame,0)
+    while active:
+        msg = await websocket.recv()
+        data = json.loads(msg)
+        evt = data.get("event")
 
-    return flipped
+        if evt == "next_step":
+            frame_counter += 1
+            print(f"[TROUBLE] Step {frame_counter}: moving {step_size} steps")
+            tc.steps_forward(step_size)
+            await asyncio.sleep(delay)
+
+            # --- capture & detect ---
+            buffer = io.BytesIO()
+            camera.capture_file(buffer, format="jpeg")
+            frame = cv2.imdecode(np.frombuffer(buffer.getvalue(), np.uint8), cv2.IMREAD_COLOR)
+            sprockets = detector.detect(frame, mode="profile")
+
+            print(f"[TROUBLE] Detected {len(sprockets)} sprockets")
+
+            # --- draw debug overlay ---
+            dbg = frame.copy()
+            for (cx, cy, w, h, area) in sprockets:
+                x1, y1 = int(cx - w / 2), int(cy - h / 2)
+                x2, y2 = int(cx + w / 2), int(cy + h / 2)
+                cv2.rectangle(dbg, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.circle(dbg, (int(cx), int(cy)), 4, (0, 0, 255), -1)
+                cv2.putText(dbg, f"cy={cy:.1f}", (x1, y1 - 5),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+            dbg = cv2.flip(dbg, 0)
+
+            # --- send to client ---
+            ok, jpg = cv2.imencode(".jpg", dbg)
+            if ok:
+                header = json.dumps({
+                    "event": "troubleshoot_frame",
+                    "frame": frame_counter,
+                    "sprocket_count": len(sprockets)
+                })
+                await websocket.send(header)
+                await websocket.send(jpg.tobytes())
+
+        elif evt == "stop_troubleshoot":
+            print("[TROUBLE] Stopping troubleshooting mode")
+            active = False
+            await websocket.send(json.dumps({
+                "event": "troubleshoot_complete",
+                "message": "Stopped troubleshooting mode"
+            }))
+        else:
+            print(f"[TROUBLE] Ignored unexpected event: {evt}")
+
+    tc.clean_up()
+    camera.stop()
+    print("[TROUBLE] Troubleshooting mode exited cleanly")
 
 def draw_sprockets_debug(frame, sprockets):
     """
