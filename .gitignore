@@ -1,0 +1,7 @@
+# Python noise
+__pycache__/
+*.pyc
+
+# Local machine config
+calibration.json
+config.json
