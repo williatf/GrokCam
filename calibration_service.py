@@ -28,15 +28,19 @@ class CalibrationService:
             raise RuntimeError("Failed to decode captured JPEG frame.")
 
         sprockets = self.detector.detect(frame, mode="profile") or []
+        classified_sprockets = self.detector.classify_sprockets(sprockets, frame.shape)
         debug_frame = frame.copy()
 
-        for cx, cy, width, height, _area in sprockets:
+        for item in classified_sprockets:
+            cx, cy, width, height, area = item["sprocket"]
+            status = item["status"]
             x1 = int(round(cx - width / 2))
             y1 = int(round(cy - height / 2))
             x2 = int(round(cx + width / 2))
             y2 = int(round(cy + height / 2))
+            color = (0, 255, 0) if status == "full" else (0, 255, 255)
 
-            cv2.rectangle(debug_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            cv2.rectangle(debug_frame, (x1, y1), (x2, y2), color, 2)
             cv2.circle(
                 debug_frame,
                 (int(round(cx)), int(round(cy))),
@@ -46,11 +50,11 @@ class CalibrationService:
             )
             cv2.putText(
                 debug_frame,
-                f"cy={cy:.1f}",
+                f"{status.upper()} cy={cy:.1f} area={area:.0f}",
                 (x1, max(15, y1 - 5)),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.5,
-                (255, 255, 0),
+                color,
                 1,
             )
 
@@ -74,7 +78,7 @@ class CalibrationService:
         if not ok:
             raise RuntimeError("Failed to encode sprocket preview JPEG.")
 
-        measurement_dict = self._build_measurements(sprockets)
+        measurement_dict = self._build_measurements(classified_sprockets)
         return measurement_dict, encoded.tobytes()
 
     def save_calibration(self, calibration_dict):
@@ -92,24 +96,44 @@ class CalibrationService:
 
         return backup_path
 
-    def _build_measurements(self, sprockets):
+    def _build_measurements(self, classified_sprockets):
         measurements = {
-            "sprocket_count": len(sprockets),
+            "sprocket_count": len(classified_sprockets),
+            "full_sprocket_count": 0,
+            "partial_sprocket_count": 0,
             "sprocket_pitch_px": None,
+            "pitch_valid": False,
+            "pitch_reason": "need_exactly_two_full_sprockets",
             "sprocket_area_nominal": None,
             "sprocket_area_min": None,
             "sprocket_area_max": None,
         }
 
-        if not sprockets:
+        if not classified_sprockets:
             return measurements
 
-        sprockets_sorted = sorted(sprockets, key=lambda sprocket: sprocket[1])
-        centers_y = np.array([float(sprocket[1]) for sprocket in sprockets_sorted], dtype=float)
-        areas = np.array([float(sprocket[4]) for sprocket in sprockets_sorted], dtype=float)
+        full_sprockets = [
+            item["sprocket"]
+            for item in classified_sprockets
+            if item["status"] == "full"
+        ]
+        partial_sprockets = [
+            item["sprocket"]
+            for item in classified_sprockets
+            if item["status"] == "partial"
+        ]
 
-        if centers_y.size >= 2:
-            measurements["sprocket_pitch_px"] = float(np.mean(np.diff(centers_y)))
+        measurements["full_sprocket_count"] = len(full_sprockets)
+        measurements["partial_sprocket_count"] = len(partial_sprockets)
+
+        accepted_sprockets = [item["sprocket"] for item in classified_sprockets]
+        areas = np.array([float(sprocket[4]) for sprocket in accepted_sprockets], dtype=float)
+
+        if len(full_sprockets) == 2:
+            full_sorted = sorted(full_sprockets, key=lambda sprocket: sprocket[1])
+            measurements["sprocket_pitch_px"] = float(abs(full_sorted[1][1] - full_sorted[0][1]))
+            measurements["pitch_valid"] = True
+            measurements["pitch_reason"] = "exactly_two_full_sprockets"
 
         nominal_area = float(np.mean(areas))
         measurements["sprocket_area_nominal"] = nominal_area

@@ -64,6 +64,35 @@ class SprocketDetector:
 
         return self._detect_profile(roi, roi_offset, frame_bgr, debug_prefix)
 
+    def classify_sprockets(self, sprockets, frame_shape, edge_margin_px=None):
+        frame_h = frame_shape[0]
+        if edge_margin_px is None:
+            edge_margin_px = max(10, int(frame_h * 0.02))
+
+        classified = []
+        for sprocket in sorted(sprockets, key=lambda item: item[1]):
+            cx, cy, width, height, area = sprocket
+            status = "partial" if self._touches_vertical_edge(
+                cy,
+                height,
+                frame_h,
+                edge_margin_px=edge_margin_px,
+            ) else "full"
+            classified.append({
+                "sprocket": sprocket,
+                "status": status,
+                "edge_margin_px": edge_margin_px,
+                "bbox": (
+                    float(cx) - float(width) / 2.0,
+                    float(cy) - float(height) / 2.0,
+                    float(cx) + float(width) / 2.0,
+                    float(cy) + float(height) / 2.0,
+                ),
+                "area": float(area),
+            })
+
+        return classified
+
     def choose_registration_pair(self, sprockets, frame_shape, expected_pitch=None):
         if len(sprockets) < 2:
             return None
@@ -442,8 +471,8 @@ class SprocketDetector:
 
         return self._clamp01(score)
 
-    def _touches_vertical_edge(self, cy, h, frame_h):
-        margin = self._edge_margin_pixels(frame_h)
+    def _touches_vertical_edge(self, cy, h, frame_h, edge_margin_px=None):
+        margin = edge_margin_px if edge_margin_px is not None else self._edge_margin_pixels(frame_h)
         y1 = float(cy) - (float(h) / 2.0)
         y2 = float(cy) + (float(h) / 2.0)
         return y1 <= margin or y2 >= (frame_h - margin)
