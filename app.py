@@ -740,7 +740,7 @@ async def main():
     print("Starting WebSocket server on ws://0.0.0.0:5000")
     server = await websockets.serve(
         handle_client,
-        "::",
+        "0.0.0.0",
          5000,
          ping_interval=None
     )
