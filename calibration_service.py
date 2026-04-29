@@ -101,6 +101,7 @@ class CalibrationService:
             "sprocket_count": len(classified_sprockets),
             "full_sprocket_count": 0,
             "partial_sprocket_count": 0,
+            "full_sprocket_areas": [],
             "sprocket_pitch_px": None,
             "pitch_valid": False,
             "pitch_reason": "need_exactly_two_full_sprockets",
@@ -125,9 +126,9 @@ class CalibrationService:
 
         measurements["full_sprocket_count"] = len(full_sprockets)
         measurements["partial_sprocket_count"] = len(partial_sprockets)
+        measurements["full_sprocket_areas"] = [float(sprocket[4]) for sprocket in full_sprockets]
 
-        accepted_sprockets = [item["sprocket"] for item in classified_sprockets]
-        areas = np.array([float(sprocket[4]) for sprocket in accepted_sprockets], dtype=float)
+        areas = np.array(measurements["full_sprocket_areas"], dtype=float)
 
         expected_pitch = self.settings.get("sprocket_pitch_px")
         if expected_pitch is None:
@@ -151,9 +152,10 @@ class CalibrationService:
                 measurements["pitch_valid"] = False
                 measurements["pitch_reason"] = "pitch_out_of_expected_range"
 
-        nominal_area = float(np.mean(areas))
-        measurements["sprocket_area_nominal"] = nominal_area
-        measurements["sprocket_area_min"] = nominal_area * 0.8
-        measurements["sprocket_area_max"] = nominal_area * 1.2
+        if areas.size > 0:
+            nominal_area = float(np.mean(areas))
+            measurements["sprocket_area_nominal"] = nominal_area
+            measurements["sprocket_area_min"] = nominal_area * 0.8
+            measurements["sprocket_area_max"] = nominal_area * 1.2
 
         return measurements

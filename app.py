@@ -196,11 +196,10 @@ def compute_calibration_summary(samples):
         for sample in samples
         if sample.get('pitch_valid') and sample.get('sprocket_pitch_px') is not None
     ]
-    area_values = [
-        float(sample['sprocket_area_nominal'])
-        for sample in samples
-        if sample.get('sprocket_area_nominal') is not None
-    ]
+    area_values = []
+    for sample in samples:
+        for area in sample.get('full_sprocket_areas', []):
+            area_values.append(float(area))
 
     valid_samples = sum(
         1 for sample in samples
@@ -239,6 +238,69 @@ def compute_calibration_summary(samples):
         })
 
     return summary
+
+
+def filter_robust_values(values, max_mad_scale=3.5):
+    if not values:
+        return []
+
+    array = np.array(values, dtype=float)
+    median = float(np.median(array))
+    deviations = np.abs(array - median)
+    mad = float(np.median(deviations))
+    if mad <= 0:
+        return array.tolist()
+
+    threshold = mad * max_mad_scale
+    filtered = array[deviations <= threshold]
+    return filtered.tolist() if filtered.size else array.tolist()
+
+
+def build_proposed_calibration(samples, exposure_result):
+    valid_pitch_values = [
+        float(sample['sprocket_pitch_px'])
+        for sample in samples
+        if sample.get('pitch_valid') and sample.get('sprocket_pitch_px') is not None
+    ]
+    valid_pitch_values = filter_robust_values(valid_pitch_values)
+
+    all_full_areas = []
+    for sample in samples:
+        all_full_areas.extend(float(area) for area in sample.get('full_sprocket_areas', []))
+    trusted_areas = filter_robust_values(all_full_areas)
+
+    if len(valid_pitch_values) < 5:
+        return None, False, 'need_at_least_5_valid_pitch_samples'
+    if not trusted_areas:
+        return None, False, 'need_trusted_full_sprocket_area_samples'
+
+    trusted_pitch = float(np.median(np.array(valid_pitch_values, dtype=float)))
+    trusted_area = float(np.median(np.array(trusted_areas, dtype=float)))
+    area_mad = float(np.median(np.abs(np.array(trusted_areas, dtype=float) - trusted_area))) if trusted_areas else 0.0
+    if trusted_area <= 0:
+        return None, False, 'invalid_trusted_area'
+
+    area_spread_frac = 0.05
+    if area_mad > 0:
+        area_spread_frac = max(0.05, min(0.12, (2.5 * area_mad) / trusted_area))
+
+    steps_per_pitch_value = settings.get('steps_per_pitch', STEPS_PER_PITCH)
+    if steps_per_pitch_value is None:
+        return None, False, 'missing_steps_per_pitch'
+
+    steps_per_pitch_value = float(steps_per_pitch_value)
+    proposed_calibration = {
+        'calibration_version': 2,
+        'calibration_resolution': list(CALIBRATION_RES),
+        'exposure_time': int(exposure_result['exposure_time']),
+        'gain': 1.0,
+        'sprocket_pitch_px': trusted_pitch,
+        'steps_per_pitch': int(round(steps_per_pitch_value)),
+        'steps_per_px': steps_per_pitch_value / trusted_pitch,
+        'sprocket_area_min': int(round(trusted_area * (1.0 - area_spread_frac))),
+        'sprocket_area_max': int(round(trusted_area * (1.0 + area_spread_frac))),
+    }
+    return proposed_calibration, True, None
 
 # --- Load calibration + config ---
 def load_settings():
@@ -691,6 +753,9 @@ async def handle_client(websocket):
     capture_stop_event = None
     focus_task = None
     focus_stop_event = None
+    latest_proposed_calibration = None
+    latest_can_save = False
+    latest_save_block_reason = 'no_calibration_sweep_run'
     try:
         async for message in websocket:
             print(f"[APP] Got message: {message}")
@@ -836,6 +901,9 @@ async def handle_client(websocket):
                 step_size = int(data.get('step_size', 25))
                 debug_scale = float(data.get('debug_scale', 1.0))
                 sweep_samples = []
+                latest_proposed_calibration = None
+                latest_can_save = False
+                latest_save_block_reason = 'calibration_sweep_in_progress'
 
                 try:
                     print(f"[APP] Starting calibration sweep: samples={total_samples}, step_size={step_size}, debug_scale={debug_scale}")
@@ -871,11 +939,21 @@ async def handle_client(websocket):
                             await asyncio.sleep(0.15)
 
                     summary = compute_calibration_summary(sweep_samples)
+                    proposed_calibration, can_save, save_block_reason = build_proposed_calibration(
+                        sweep_samples,
+                        exposure_result,
+                    )
+                    latest_proposed_calibration = proposed_calibration
+                    latest_can_save = can_save
+                    latest_save_block_reason = save_block_reason
                     summary['exposure'] = exposure_result
                     print(f"[APP] Calibration sweep complete: {summary}")
                     await websocket.send(json.dumps({
                         'event': 'calibration_sweep_complete',
-                        'summary': summary
+                        'summary': summary,
+                        'proposed_calibration': proposed_calibration,
+                        'can_save': can_save,
+                        'save_block_reason': save_block_reason
                     }))
 
                 except Exception as exc:
@@ -889,6 +967,32 @@ async def handle_client(websocket):
                     tc.clean_up()
                     camera.stop()
 
+                continue
+
+            elif event == 'calibration_save':
+                if not latest_can_save or not latest_proposed_calibration:
+                    reason = latest_save_block_reason or 'no_proposed_calibration_available'
+                    print(f"[APP] Calibration save blocked: {reason}")
+                    await websocket.send(json.dumps({
+                        'event': 'calibration_save_blocked',
+                        'reason': reason
+                    }))
+                    continue
+
+                try:
+                    backup_path = calibrator.save_calibration(latest_proposed_calibration)
+                    print(f"[APP] Calibration saved to calibration.json (backup={backup_path})")
+                    await websocket.send(json.dumps({
+                        'event': 'calibration_saved',
+                        'backup_path': backup_path,
+                        'calibration': latest_proposed_calibration
+                    }))
+                except Exception as exc:
+                    print(f"[APP] Calibration save failed: {exc}")
+                    await websocket.send(json.dumps({
+                        'event': 'calibration_error',
+                        'message': f'Calibration save failed: {exc}'
+                    }))
                 continue
 
             elif event == 'jog_forward' or event == 'jog_back':
