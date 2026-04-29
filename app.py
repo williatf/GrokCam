@@ -668,10 +668,11 @@ async def handle_client(websocket):
 
                 try:
                     tc.light_on()
-                    apply_capture_camera_controls()
+                    print("[APP] Applying auto-exposure controls for calibration preview")
+                    apply_focus_camera_controls()
                     camera.start()
                     print("[APP] LED on + camera, stabilizing for calibration preview...")
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(1.0)
 
                     measurement, jpg_bytes = calibrator.capture_sprocket_preview(debug_scale)
 
