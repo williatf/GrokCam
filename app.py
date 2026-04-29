@@ -194,7 +194,7 @@ def compute_calibration_summary(samples):
     pitch_values = [
         float(sample['sprocket_pitch_px'])
         for sample in samples
-        if sample.get('sprocket_pitch_px') is not None
+        if sample.get('pitch_valid') and sample.get('sprocket_pitch_px') is not None
     ]
     area_values = [
         float(sample['sprocket_area_nominal'])
@@ -204,8 +204,7 @@ def compute_calibration_summary(samples):
 
     valid_samples = sum(
         1 for sample in samples
-        if sample.get('sprocket_pitch_px') is not None
-        or sample.get('sprocket_area_nominal') is not None
+        if sample.get('pitch_valid') and sample.get('sprocket_pitch_px') is not None
     )
 
     summary = {
