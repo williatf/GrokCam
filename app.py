@@ -10,6 +10,7 @@ import base64
 import json
 from control import tcControl
 from sprocket import SprocketDetector
+from calibration_service import CalibrationService
 import socket
 import os
 from collections import deque
@@ -256,6 +257,8 @@ detector = SprocketDetector(
     adaptive_block=41, adaptive_C=7,
     method="profile"
 )
+
+calibrator = CalibrationService(camera, tc, detector, settings)
 
 last_error = 0 # difference between actual and target for sprocket detection
 
@@ -612,6 +615,52 @@ async def handle_client(websocket):
                         'event': 'info',
                         'message': 'No active capture task'
                     }))
+                continue
+
+            elif event == 'calibration_preview':
+                if capture_task and not capture_task.done():
+                    await websocket.send(json.dumps({
+                        'event': 'error',
+                        'message': 'Cannot preview calibration while capture is running'
+                    }))
+                    continue
+                if focus_task and not focus_task.done():
+                    await websocket.send(json.dumps({
+                        'event': 'error',
+                        'message': 'Cannot preview calibration while focus is active'
+                    }))
+                    continue
+
+                debug_scale = float(data.get('debug_scale', 1.0))
+
+                try:
+                    tc.light_on()
+                    camera.start()
+                    print("[APP] LED on + camera, stabilizing for calibration preview...")
+                    await asyncio.sleep(0.5)
+
+                    measurement, jpg_bytes = calibrator.capture_sprocket_preview(debug_scale)
+
+                    await websocket.send(json.dumps({
+                        'event': 'calibration_measurement',
+                        **measurement,
+                        'size': len(jpg_bytes)
+                    }))
+                    await websocket.send(jpg_bytes)
+
+                    print(f"[APP] Sent calibration preview ({len(jpg_bytes)} bytes)")
+
+                except Exception as exc:
+                    print(f"[APP] Calibration preview failed: {exc}")
+                    await websocket.send(json.dumps({
+                        'event': 'error',
+                        'message': f'Calibration preview failed: {exc}'
+                    }))
+
+                finally:
+                    tc.clean_up()
+                    camera.stop()
+
                 continue
 
             elif event == 'jog_forward' or event == 'jog_back':
