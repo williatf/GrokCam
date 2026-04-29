@@ -1102,14 +1102,20 @@ async def handle_client(websocket):
                     registration_y = get_registration_y(frame_bgr, sprockets)
 
                     preview_frame = frame_bgr.copy()
+                    frame_height = preview_frame.shape[0]
                     if registration_y is not None:
-                        reg_y = int(round(registration_y))
-                        cv2.line(preview_frame, (0, reg_y), (preview_frame.shape[1] - 1, reg_y), (0, 0, 255), 2)
+                        flipped_y = int(round(frame_height - registration_y))
+                        cv2.line(preview_frame, (0, flipped_y), (preview_frame.shape[1] - 1, flipped_y), (0, 0, 255), 2)
 
                     existing_crop = settings.get('crop') if isinstance(settings.get('crop'), dict) else None
                     if existing_crop is not None and registration_y is not None:
                         x1, y1, x2, y2 = get_relative_crop_rect(frame_bgr, registration_y)
-                        cv2.rectangle(preview_frame, (x1, y1), (x2, y2), (255, 255, 0), 2)
+                        flipped_y1 = int(frame_height - y2)
+                        flipped_y2 = int(frame_height - y1)
+                        cv2.rectangle(preview_frame, (x1, flipped_y1), (x2, flipped_y2), (255, 255, 0), 2)
+
+                    # Preview is vertically flipped to match capture output; coordinates remain in original frame space
+                    preview_frame = cv2.flip(preview_frame, 0)
 
                     preview_height = max(1, int(preview_frame.shape[0] * (preview_width / preview_frame.shape[1])))
                     preview_frame = cv2.resize(
