@@ -308,7 +308,7 @@ def apply_focus_camera_controls():
     })
 
 
-async def tune_calibration_exposure(camera, detector, target=242, percentile=99.5, max_iters=8):
+async def tune_calibration_exposure(camera, detector, target=225, percentile=99.5, max_iters=8):
     exposure = int(EXPOSURE_TIME)
     last_percentile = 0.0
     last_max = 0.0
