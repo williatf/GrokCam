@@ -316,6 +316,41 @@ def load_settings():
     merged = {**calib, **config}
     return merged
 
+
+def refresh_runtime_settings():
+    global settings, pitch_px, steps_per_pitch, calib_res, exposure_time, gain
+    global steps_per_px, SPROCKET_PITCH_PX, STEPS_PER_PITCH
+    global CALIBRATION_RES, EXPOSURE_TIME, GAIN
+
+    previous_resolution = CALIBRATION_RES if 'CALIBRATION_RES' in globals() else None
+
+    settings = load_settings()
+    pitch_px = settings.get("sprocket_pitch_px", 835)
+    steps_per_pitch = settings.get("steps_per_pitch", 280)
+    calib_res = settings.get("calibration_resolution", [2028,1520])
+    exposure_time = settings.get("exposure_time", 612)
+    gain = settings.get("gain", 1.0)
+
+    if not pitch_px or not steps_per_pitch or not calib_res or not exposure_time or gain is None:
+        raise RuntimeError("Calibration data missing. Please run calibrate_16mm.py first.")
+
+    steps_per_px = settings.get("steps_per_px", steps_per_pitch / pitch_px)
+
+    SPROCKET_PITCH_PX = pitch_px
+    STEPS_PER_PITCH = steps_per_pitch
+    CALIBRATION_RES = tuple(calib_res)
+    EXPOSURE_TIME = exposure_time
+    GAIN = gain
+
+    detector.min_area = settings.get("sprocket_area_min", detector.min_area)
+    detector.max_area = settings.get("sprocket_area_max", detector.max_area)
+    detector.expected_pitch = int(SPROCKET_PITCH_PX)
+    calibrator.settings = settings
+
+    print("[APP] Runtime calibration settings refreshed")
+    if previous_resolution is not None and tuple(previous_resolution) != CALIBRATION_RES:
+        print("[APP] Calibration resolution changed; service restart recommended to reconfigure camera")
+
 settings = load_settings()
 print("Loaded settings:")
 print(json.dumps(settings, indent=2))
@@ -981,11 +1016,22 @@ async def handle_client(websocket):
 
                 try:
                     backup_path = calibrator.save_calibration(latest_proposed_calibration)
+                    refresh_runtime_settings()
+                    apply_capture_camera_controls()
                     print(f"[APP] Calibration saved to calibration.json (backup={backup_path})")
                     await websocket.send(json.dumps({
                         'event': 'calibration_saved',
-                        'backup_path': backup_path,
-                        'calibration': latest_proposed_calibration
+                        'message': 'Calibration saved and runtime settings refreshed',
+                        'settings': {
+                            'exposure_time': EXPOSURE_TIME,
+                            'gain': GAIN,
+                            'sprocket_pitch_px': SPROCKET_PITCH_PX,
+                            'steps_per_pitch': STEPS_PER_PITCH,
+                            'steps_per_px': steps_per_px,
+                            'sprocket_area_min': detector.min_area,
+                            'sprocket_area_max': detector.max_area
+                        },
+                        'backup_path': backup_path
                     }))
                 except Exception as exc:
                     print(f"[APP] Calibration save failed: {exc}")
