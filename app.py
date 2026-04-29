@@ -189,6 +189,58 @@ def encode_frame(frame_cropped, frame_num):
 
     return header, jpg_bytes
 
+
+def compute_calibration_summary(samples):
+    pitch_values = [
+        float(sample['sprocket_pitch_px'])
+        for sample in samples
+        if sample.get('sprocket_pitch_px') is not None
+    ]
+    area_values = [
+        float(sample['sprocket_area_nominal'])
+        for sample in samples
+        if sample.get('sprocket_area_nominal') is not None
+    ]
+
+    valid_samples = sum(
+        1 for sample in samples
+        if sample.get('sprocket_pitch_px') is not None
+        or sample.get('sprocket_area_nominal') is not None
+    )
+
+    summary = {
+        'pitch_mean': None,
+        'pitch_min': None,
+        'pitch_max': None,
+        'pitch_std': None,
+        'area_mean': None,
+        'area_min': None,
+        'area_max': None,
+        'area_std': None,
+        'valid_samples': valid_samples,
+        'total_samples': len(samples),
+    }
+
+    if pitch_values:
+        pitch_array = np.array(pitch_values, dtype=float)
+        summary.update({
+            'pitch_mean': float(np.mean(pitch_array)),
+            'pitch_min': float(np.min(pitch_array)),
+            'pitch_max': float(np.max(pitch_array)),
+            'pitch_std': float(np.std(pitch_array)),
+        })
+
+    if area_values:
+        area_array = np.array(area_values, dtype=float)
+        summary.update({
+            'area_mean': float(np.mean(area_array)),
+            'area_min': float(np.min(area_array)),
+            'area_max': float(np.max(area_array)),
+            'area_std': float(np.std(area_array)),
+        })
+
+    return summary
+
 # --- Load calibration + config ---
 def load_settings():
     calib = {}
@@ -690,6 +742,77 @@ async def handle_client(websocket):
                     await websocket.send(json.dumps({
                         'event': 'error',
                         'message': f'Calibration preview failed: {exc}'
+                    }))
+
+                finally:
+                    tc.clean_up()
+                    camera.stop()
+
+                continue
+
+            elif event == 'calibration_sweep':
+                if capture_task and not capture_task.done():
+                    await websocket.send(json.dumps({
+                        'event': 'error',
+                        'message': 'Cannot run calibration sweep while capture is running'
+                    }))
+                    continue
+                if focus_task and not focus_task.done():
+                    await websocket.send(json.dumps({
+                        'event': 'error',
+                        'message': 'Cannot run calibration sweep while focus is active'
+                    }))
+                    continue
+
+                total_samples = max(1, int(data.get('samples', 10)))
+                step_size = int(data.get('step_size', 25))
+                debug_scale = float(data.get('debug_scale', 1.0))
+                sweep_samples = []
+
+                try:
+                    print(f"[APP] Starting calibration sweep: samples={total_samples}, step_size={step_size}, debug_scale={debug_scale}")
+                    tc.light_on()
+                    print("[APP] Applying auto-exposure controls for calibration sweep")
+                    apply_focus_camera_controls()
+                    camera.start()
+                    print("[APP] LED on + camera, stabilizing for calibration sweep...")
+                    await asyncio.sleep(1.0)
+
+                    for sample_index in range(total_samples):
+                        measurement, jpg_bytes = calibrator.capture_sprocket_preview(debug_scale)
+                        sample_measurement = dict(measurement)
+                        sample_measurement['sample'] = sample_index
+                        sweep_samples.append(sample_measurement)
+
+                        await websocket.send(json.dumps({
+                            'event': 'calibration_sweep_sample',
+                            **sample_measurement,
+                            'size': len(jpg_bytes)
+                        }))
+                        await websocket.send(jpg_bytes)
+                        print(
+                            f"[APP] Calibration sweep sample {sample_index + 1}/{total_samples}: "
+                            f"pitch={sample_measurement.get('sprocket_pitch_px')} "
+                            f"area={sample_measurement.get('sprocket_area_nominal')}"
+                        )
+
+                        if sample_index < total_samples - 1:
+                            tc.steps_forward(step_size)
+                            print(f"[APP] Calibration sweep moved forward {step_size} steps")
+                            await asyncio.sleep(0.15)
+
+                    summary = compute_calibration_summary(sweep_samples)
+                    print(f"[APP] Calibration sweep complete: {summary}")
+                    await websocket.send(json.dumps({
+                        'event': 'calibration_sweep_complete',
+                        'summary': summary
+                    }))
+
+                except Exception as exc:
+                    print(f"[APP] Calibration sweep failed: {exc}")
+                    await websocket.send(json.dumps({
+                        'event': 'error',
+                        'message': f'Calibration sweep failed: {exc}'
                     }))
 
                 finally:
