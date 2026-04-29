@@ -490,41 +490,60 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
         camera.stop()
         print("[APP] Capture task cleaned up")
 
-async def run_focus(websocket, stop_event):
+async def run_focus(websocket, stop_event, preview_width=800, fps=5):
     print("[APP] Focus task starting")
     tc.light_on()
     camera.start()
     print("[APP] LED on + camera for focus")
+
+    frame_num = 0
+    preview_width = max(1, int(preview_width))
+    frame_delay = 1.0 / max(1.0, float(fps))
+
     try:
+        await asyncio.sleep(1.0)
         await websocket.send(json.dumps({
-            'event': 'info',
-            'message': 'Focus mode started'
+            'event': 'focus_started'
         }))
+
         while not stop_event.is_set():
             buffer = io.BytesIO()
             camera.capture_file(buffer, format='jpeg')
             frame_bgr = cv2.imdecode(np.frombuffer(buffer.getvalue(), np.uint8), cv2.IMREAD_COLOR)
+            if frame_bgr is None:
+                raise RuntimeError('Failed to decode focus preview frame')
 
-            cv2.imshow("Focus Preview", frame_bgr)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                print("[APP] Focus task received local quit")
-                stop_event.set()
-                break
-            await asyncio.sleep(0.05)
+            frame_num += 1
+            scale_h = int(frame_bgr.shape[0] * (preview_width / frame_bgr.shape[1]))
+            frame_resized = cv2.resize(
+                frame_bgr,
+                (preview_width, scale_h),
+                interpolation=cv2.INTER_AREA
+            )
+            frame_flipped = cv2.flip(frame_resized, 0)
+
+            ok, encoded = cv2.imencode(
+                '.jpg',
+                frame_flipped,
+                [int(cv2.IMWRITE_JPEG_QUALITY), 85]
+            )
+            if not ok:
+                raise RuntimeError('Failed to encode focus preview frame')
+
+            jpg_bytes = encoded.tobytes()
+            await websocket.send(json.dumps({
+                'event': 'focus_frame',
+                'frame': frame_num,
+                'size': len(jpg_bytes)
+            }))
+            await websocket.send(jpg_bytes)
+            await asyncio.sleep(frame_delay)
     finally:
-        try:
-            cv2.destroyWindow("Focus Preview")
-            cv2.waitKey(1)  # ensure UI thread processes destroy
-        except cv2.error as err:
-            print(f"[APP] Focus destroy warning: {err}")
-        cv2.destroyAllWindows()
-        cv2.waitKey(1)
         tc.light_off()
         camera.stop()
         try:
             await websocket.send(json.dumps({
-                'event': 'info',
-                'message': 'Focus mode stopped'
+                'event': 'focus_stopped'
             }))
         except (ConnectionClosedError, ConnectionClosedOK):
             print("[APP] Focus stop notification skipped: client disconnected")
@@ -727,7 +746,11 @@ async def handle_client(websocket):
                     }))
                     continue
                 focus_stop_event = asyncio.Event()
-                focus_task = asyncio.create_task(run_focus(websocket, focus_stop_event))
+                preview_width = data.get('preview_width', 800)
+                fps = data.get('fps', 5)
+                focus_task = asyncio.create_task(
+                    run_focus(websocket, focus_stop_event, preview_width=preview_width, fps=fps)
+                )
                 continue
 
             elif event == "troubleshoot_start":
