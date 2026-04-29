@@ -308,6 +308,75 @@ def apply_focus_camera_controls():
     })
 
 
+async def tune_calibration_exposure(camera, detector, target=242, percentile=99.5, max_iters=8):
+    exposure = int(EXPOSURE_TIME)
+    last_percentile = 0.0
+    last_max = 0.0
+    last_clip_pct = 0.0
+    iterations = 0
+
+    for iteration in range(1, max_iters + 1):
+        camera.set_controls({
+            "ExposureTime": int(exposure),
+            "AnalogueGain": 1.0,
+            "AeEnable": False,
+            "AwbEnable": False,
+        })
+        await asyncio.sleep(0.15)
+
+        buffer = io.BytesIO()
+        camera.capture_file(buffer, format='jpeg')
+        frame_bgr = cv2.imdecode(np.frombuffer(buffer.getvalue(), np.uint8), cv2.IMREAD_COLOR)
+        if frame_bgr is None:
+            raise RuntimeError('Failed to decode calibration exposure frame')
+
+        frame_h, frame_w = frame_bgr.shape[:2]
+        strip_w = max(1, int(frame_w * detector.auto_roi))
+        if detector.side == 'left':
+            roi = frame_bgr[:, :strip_w]
+        else:
+            roi = frame_bgr[:, -strip_w:]
+
+        gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        last_percentile = float(np.percentile(gray_roi, percentile))
+        last_max = float(np.max(gray_roi))
+        last_clip_pct = float((np.count_nonzero(gray_roi >= 250) / gray_roi.size) * 100.0)
+        iterations = iteration
+
+        print(
+            f"[APP] Calibration exposure iter {iteration}: exposure={int(exposure)} "
+            f"p{percentile}={last_percentile:.1f} max={last_max:.1f} clip_pct={last_clip_pct:.3f}"
+        )
+
+        if abs(last_percentile - target) <= 3 and last_clip_pct < 0.1:
+            break
+
+        new_exposure = exposure * target / max(last_percentile, 1.0)
+        exposure = max(100, min(20000, int(new_exposure)))
+
+    camera.set_controls({
+        "ExposureTime": int(exposure),
+        "AnalogueGain": 1.0,
+        "AeEnable": False,
+        "AwbEnable": False,
+    })
+    await asyncio.sleep(0.15)
+
+    print(
+        f"[APP] Calibration exposure locked: exposure={int(exposure)} gain=1.0 "
+        f"p{percentile}={last_percentile:.1f} max={last_max:.1f} clip_pct={last_clip_pct:.3f}"
+    )
+
+    return {
+        "exposure_time": int(exposure),
+        "gain": 1.0,
+        "roi_percentile": last_percentile,
+        "roi_max": last_max,
+        "clip_pct": last_clip_pct,
+        "iterations": iterations,
+    }
+
+
 apply_capture_camera_controls()
 
 detector = SprocketDetector(
@@ -719,17 +788,17 @@ async def handle_client(websocket):
 
                 try:
                     tc.light_on()
-                    print("[APP] Applying auto-exposure controls for calibration preview")
-                    apply_focus_camera_controls()
                     camera.start()
                     print("[APP] LED on + camera, stabilizing for calibration preview...")
-                    await asyncio.sleep(1.0)
+                    await asyncio.sleep(0.5)
+                    exposure_result = await tune_calibration_exposure(camera, detector)
 
                     measurement, jpg_bytes = calibrator.capture_sprocket_preview(debug_scale)
 
                     await websocket.send(json.dumps({
                         'event': 'calibration_measurement',
                         **measurement,
+                        'exposure': exposure_result,
                         'size': len(jpg_bytes)
                     }))
                     await websocket.send(jpg_bytes)
@@ -771,16 +840,17 @@ async def handle_client(websocket):
                 try:
                     print(f"[APP] Starting calibration sweep: samples={total_samples}, step_size={step_size}, debug_scale={debug_scale}")
                     tc.light_on()
-                    print("[APP] Applying auto-exposure controls for calibration sweep")
-                    apply_focus_camera_controls()
                     camera.start()
                     print("[APP] LED on + camera, stabilizing for calibration sweep...")
-                    await asyncio.sleep(1.0)
+                    await asyncio.sleep(0.5)
+                    exposure_result = await tune_calibration_exposure(camera, detector)
 
                     for sample_index in range(total_samples):
                         measurement, jpg_bytes = calibrator.capture_sprocket_preview(debug_scale)
                         sample_measurement = dict(measurement)
                         sample_measurement['sample'] = sample_index
+                        sample_measurement['exposure_time'] = exposure_result['exposure_time']
+                        sample_measurement['gain'] = exposure_result['gain']
                         sweep_samples.append(sample_measurement)
 
                         await websocket.send(json.dumps({
@@ -801,6 +871,7 @@ async def handle_client(websocket):
                             await asyncio.sleep(0.15)
 
                     summary = compute_calibration_summary(sweep_samples)
+                    summary['exposure'] = exposure_result
                     print(f"[APP] Calibration sweep complete: {summary}")
                     await websocket.send(json.dumps({
                         'event': 'calibration_sweep_complete',
