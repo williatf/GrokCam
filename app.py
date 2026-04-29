@@ -825,6 +825,8 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
             debug_frame = draw_sprockets_debug(frame_bgr, sprockets if sprockets else [])
             registration_y = get_registration_y(frame_bgr, sprockets if sprockets else [])
             frame_cropped = crop_frame_relative_to_registration(frame_bgr, registration_y)
+            # Flip vertically to correct camera orientation (matches legacy behavior)
+            frame_cropped = cv2.flip(frame_cropped, 0)
 
             timestamp = int(time.time() * 1000)
             filename = os.path.join(SAVE_DIR, f"frame_{timestamp}.png")
