@@ -256,7 +256,7 @@ def filter_robust_values(values, max_mad_scale=3.5):
     return filtered.tolist() if filtered.size else array.tolist()
 
 
-def build_proposed_calibration(samples, exposure_result):
+def build_proposed_calibration(samples, exposure_result, motor_calibration=None):
     valid_pitch_values = [
         float(sample['sprocket_pitch_px'])
         for sample in samples
@@ -284,7 +284,11 @@ def build_proposed_calibration(samples, exposure_result):
     if area_mad > 0:
         area_spread_frac = max(0.05, min(0.12, (2.5 * area_mad) / trusted_area))
 
-    steps_per_pitch_value = settings.get('steps_per_pitch', STEPS_PER_PITCH)
+    if motor_calibration and motor_calibration.get('motor_updated'):
+        steps_per_pitch_value = motor_calibration.get('motor_steps_per_pitch')
+    else:
+        steps_per_pitch_value = settings.get('steps_per_pitch', STEPS_PER_PITCH)
+
     if steps_per_pitch_value is None:
         return None, False, 'missing_steps_per_pitch'
 
@@ -471,6 +475,73 @@ async def tune_calibration_exposure(camera, detector, target=225, percentile=99.
         "roi_max": last_max,
         "clip_pct": last_clip_pct,
         "iterations": iterations,
+    }
+
+
+async def measure_steps_per_pitch_live(camera, tc, detector, sprocket_pitch_px, step_chunk=20, max_steps=500):
+    def choose_reference_y(frame_bgr, sprockets):
+        # Motor calibration must follow one physical sprocket, not a pair midpoint.
+        classified = detector.classify_sprockets(sprockets, frame_bgr.shape)
+        full_sprockets = [item['sprocket'] for item in classified if item.get('status') == 'full']
+        if full_sprockets:
+            center_y = frame_bgr.shape[0] / 2.0
+            anchor = min(full_sprockets, key=lambda sprocket: abs(sprocket[1] - center_y))
+            return float(anchor[1])
+
+        return None
+
+    buffer = io.BytesIO()
+    camera.capture_file(buffer, format='jpeg')
+    frame_bgr = cv2.imdecode(np.frombuffer(buffer.getvalue(), np.uint8), cv2.IMREAD_COLOR)
+    if frame_bgr is None:
+        return {'valid': False, 'reason': 'failed_to_decode_start_frame'}
+
+    sprockets = detector.detect(frame_bgr, mode='profile') or []
+    if not sprockets:
+        return {'valid': False, 'reason': 'no_sprockets_in_start_frame'}
+
+    start_y = choose_reference_y(frame_bgr, sprockets)
+    if start_y is None:
+        return {'valid': False, 'reason': 'no_stable_registration_reference'}
+
+    total_steps = 0
+    threshold = float(sprocket_pitch_px) * 0.85
+
+    while total_steps < max_steps:
+        tc.steps_forward(step_chunk)
+        total_steps += step_chunk
+        await asyncio.sleep(0.05)
+
+        buffer = io.BytesIO()
+        camera.capture_file(buffer, format='jpeg')
+        frame_bgr = cv2.imdecode(np.frombuffer(buffer.getvalue(), np.uint8), cv2.IMREAD_COLOR)
+        if frame_bgr is None:
+            continue
+
+        sprockets = detector.detect(frame_bgr, mode='profile') or []
+        if not sprockets:
+            continue
+
+        current_y = choose_reference_y(frame_bgr, sprockets)
+        if current_y is None:
+            continue
+
+        delta_y = abs(float(current_y) - float(start_y))
+        if delta_y >= threshold:
+            steps_per_px_value = total_steps / delta_y
+            steps_per_pitch_value = steps_per_px_value * float(sprocket_pitch_px)
+            return {
+                'steps_per_pitch': int(round(steps_per_pitch_value)),
+                'steps_per_px': float(steps_per_px_value),
+                'total_steps': int(total_steps),
+                'delta_y': float(delta_y),
+                'valid': True,
+            }
+
+    return {
+        'valid': False,
+        'reason': 'did_not_reach_pitch_threshold',
+        'total_steps': int(total_steps),
     }
 
 
@@ -936,6 +1007,7 @@ async def handle_client(websocket):
                 step_size = int(data.get('step_size', 25))
                 debug_scale = float(data.get('debug_scale', 1.0))
                 sweep_samples = []
+                motor_runs = []
                 latest_proposed_calibration = None
                 latest_can_save = False
                 latest_save_block_reason = 'calibration_sweep_in_progress'
@@ -974,14 +1046,59 @@ async def handle_client(websocket):
                             await asyncio.sleep(0.15)
 
                     summary = compute_calibration_summary(sweep_samples)
+                    trusted_pitch_for_motor = summary.get('pitch_mean')
+                    if trusted_pitch_for_motor is None:
+                        trusted_pitch_for_motor = settings.get('sprocket_pitch_px', 814)
+
+                    motor_total_runs = 5
+                    for motor_run_index in range(motor_total_runs):
+                        motor_result = await measure_steps_per_pitch_live(
+                            camera,
+                            tc,
+                            detector,
+                            trusted_pitch_for_motor,
+                            step_chunk=20,
+                            max_steps=500,
+                        )
+                        motor_runs.append(motor_result)
+                        print(f"[APP] Motor calibration run {motor_run_index + 1}/{motor_total_runs}: {motor_result}")
+                        if motor_run_index < motor_total_runs - 1:
+                            tc.steps_forward(30)
+                            print("[APP] Motor calibration offset move: 30 steps")
+                            await asyncio.sleep(0.05)
+
+                    valid_motor_steps = [
+                        float(result['steps_per_pitch'])
+                        for result in motor_runs
+                        if result.get('valid') and result.get('steps_per_pitch') is not None
+                    ]
+                    filtered_motor_steps = filter_robust_values(valid_motor_steps)
+                    motor_valid_runs = len(valid_motor_steps)
+                    motor_updated = len(filtered_motor_steps) >= 3
+                    motor_steps_per_pitch = None
+                    if motor_updated:
+                        motor_steps_per_pitch = int(round(np.median(np.array(filtered_motor_steps, dtype=float))))
+
+                    motor_calibration = {
+                        'motor_steps_per_pitch': motor_steps_per_pitch,
+                        'motor_valid_runs': motor_valid_runs,
+                        'motor_total_runs': motor_total_runs,
+                        'motor_updated': motor_updated,
+                    }
+
                     proposed_calibration, can_save, save_block_reason = build_proposed_calibration(
                         sweep_samples,
                         exposure_result,
+                        motor_calibration,
                     )
                     latest_proposed_calibration = proposed_calibration
                     latest_can_save = can_save
                     latest_save_block_reason = save_block_reason
                     summary['exposure'] = exposure_result
+                    summary['motor_steps_per_pitch'] = motor_steps_per_pitch
+                    summary['motor_valid_runs'] = motor_valid_runs
+                    summary['motor_total_runs'] = motor_total_runs
+                    summary['motor_updated'] = motor_updated
                     print(f"[APP] Calibration sweep complete: {summary}")
                     await websocket.send(json.dumps({
                         'event': 'calibration_sweep_complete',
