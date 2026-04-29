@@ -239,13 +239,25 @@ config_main = camera.create_still_configuration(main={"size": CALIBRATION_RES})
 camera.configure(config_main)
 camera.options['quality'] = 90
 
-# Use calibrated exposure/gain
-camera.set_controls({
-    "ExposureTime": EXPOSURE_TIME,
-    "AnalogueGain": GAIN,
-    "AeEnable": False,
-    "AwbEnable": False,
-})
+def apply_capture_camera_controls():
+    print("[APP] Switching camera to capture controls")
+    camera.set_controls({
+        "ExposureTime": EXPOSURE_TIME,
+        "AnalogueGain": GAIN,
+        "AeEnable": False,
+        "AwbEnable": False,
+    })
+
+
+def apply_focus_camera_controls():
+    print("[APP] Switching camera to focus controls")
+    camera.set_controls({
+        "AeEnable": True,
+        "AwbEnable": False,
+    })
+
+
+apply_capture_camera_controls()
 
 detector = SprocketDetector(
     side="left", auto_roi=0.40,
@@ -402,6 +414,7 @@ os.makedirs(SAVE_DIR, exist_ok=True)
 async def run_capture(websocket, num_frames, stop_event, preview_width=800, debug_scale=1.0):
     print("[APP] Capture task starting")
     tc.light_on()
+    apply_capture_camera_controls()
     camera.start()
     print("[APP] LED on + camera, stabilizing...")
     try:
@@ -494,6 +507,7 @@ async def run_focus(websocket, stop_event, preview_width=800, fps=5):
     print("[APP] Focus task starting")
     tc.light_on()
     camera.start()
+    apply_focus_camera_controls()
     print("[APP] LED on + camera for focus")
 
     frame_num = 0
@@ -654,6 +668,7 @@ async def handle_client(websocket):
 
                 try:
                     tc.light_on()
+                    apply_capture_camera_controls()
                     camera.start()
                     print("[APP] LED on + camera, stabilizing for calibration preview...")
                     await asyncio.sleep(0.5)
@@ -692,6 +707,7 @@ async def handle_client(websocket):
                 frames = int(data.get("frames", 1))
                 direction = 1 if event == "jog_forward" else -1
                 tc.light_on()
+                apply_capture_camera_controls()
                 camera.start()
                 print("[APP] LED on + camera, stabilizing...")
 
