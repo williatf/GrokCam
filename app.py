@@ -174,6 +174,85 @@ def crop_film_frame(frame, anchor, pitch_px=None):
 
     return flipped
 
+
+def get_registration_y(frame_bgr, sprockets):
+    registration = detector.choose_registration(
+        sprockets,
+        frame_bgr.shape,
+        expected_pitch=SPROCKET_PITCH_PX,
+    )
+    if registration.get('mode') in ('pair', 'single') and registration.get('actual_y') is not None:
+        return float(registration['actual_y'])
+    return None
+
+
+def get_relative_crop_rect(frame_bgr, registration_y):
+    frame_h, frame_w = frame_bgr.shape[:2]
+    crop_settings = settings.get('crop')
+    if not isinstance(crop_settings, dict) or registration_y is None:
+        return 0, 0, frame_w, frame_h
+
+    try:
+        x1 = int(crop_settings['x1'])
+        x2 = int(crop_settings['x2'])
+        y_offset = float(crop_settings['y_offset'])
+        height = int(crop_settings['height'])
+    except (KeyError, TypeError, ValueError):
+        return 0, 0, frame_w, frame_h
+
+    if height <= 0:
+        return 0, 0, frame_w, frame_h
+
+    x1 = max(0, min(frame_w - 1, x1))
+    x2 = max(x1 + 1, min(frame_w, x2))
+
+    y1 = int(round(float(registration_y) + y_offset))
+    y2 = y1 + height
+
+    if y1 < 0:
+        y2 = min(frame_h, y2 - y1)
+        y1 = 0
+    if y2 > frame_h:
+        y1 = max(0, y1 - (y2 - frame_h))
+        y2 = frame_h
+
+    if y2 <= y1:
+        return 0, 0, frame_w, frame_h
+
+    return int(x1), int(y1), int(x2), int(y2)
+
+
+def crop_frame_relative_to_registration(frame_bgr, registration_y):
+    x1, y1, x2, y2 = get_relative_crop_rect(frame_bgr, registration_y)
+    return frame_bgr[y1:y2, x1:x2]
+
+
+def save_crop_settings(rect, registration_y, frame_size):
+    frame_w, frame_h = frame_size
+    x1, y1, x2, y2 = rect
+    crop_data = {
+        'reference': 'registration_y',
+        'x1': int(x1),
+        'x2': int(x2),
+        'y_offset': float(y1 - registration_y),
+        'height': int(y2 - y1),
+        'source_resolution': [int(frame_w), int(frame_h)],
+    }
+
+    config_path = 'config.json'
+    config_data = {}
+    if os.path.exists(config_path):
+        with open(config_path, 'r', encoding='utf-8') as handle:
+            config_data = json.load(handle)
+
+    config_data['crop'] = crop_data
+
+    with open(config_path, 'w', encoding='utf-8') as handle:
+        json.dump(config_data, handle, indent=2)
+        handle.write('\n')
+
+    return crop_data
+
 async def encode_frame_async(frame_cropped, frame_num):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, encode_frame, frame_cropped, frame_num)
@@ -744,9 +823,8 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
 
             sprockets = detector.detect(frame_bgr, mode="profile")
             debug_frame = draw_sprockets_debug(frame_bgr, sprockets if sprockets else [])
-            frame_cropped = crop_film_frame(
-                frame_bgr, sprockets[0] if sprockets else None, SPROCKET_PITCH_PX
-            )
+            registration_y = get_registration_y(frame_bgr, sprockets if sprockets else [])
+            frame_cropped = crop_frame_relative_to_registration(frame_bgr, registration_y)
 
             timestamp = int(time.time() * 1000)
             filename = os.path.join(SAVE_DIR, f"frame_{timestamp}.png")
@@ -987,6 +1065,117 @@ async def handle_client(websocket):
                     tc.clean_up()
                     camera.stop()
 
+                continue
+
+            elif event == 'crop_calibration_preview':
+                if capture_task and not capture_task.done():
+                    await websocket.send(json.dumps({
+                        'event': 'error',
+                        'message': 'Cannot preview crop calibration while capture is running'
+                    }))
+                    continue
+                if focus_task and not focus_task.done():
+                    await websocket.send(json.dumps({
+                        'event': 'error',
+                        'message': 'Cannot preview crop calibration while focus is active'
+                    }))
+                    continue
+
+                preview_width = max(1, int(data.get('preview_width', 800)))
+
+                try:
+                    tc.light_on()
+                    apply_capture_camera_controls()
+                    camera.start()
+                    print('[APP] LED on + camera for crop calibration preview')
+                    await asyncio.sleep(0.5)
+
+                    buffer = io.BytesIO()
+                    camera.capture_file(buffer, format='jpeg')
+                    frame_bgr = cv2.imdecode(np.frombuffer(buffer.getvalue(), np.uint8), cv2.IMREAD_COLOR)
+                    if frame_bgr is None:
+                        raise RuntimeError('Failed to decode crop calibration preview frame')
+
+                    sprockets = detector.detect(frame_bgr, mode='profile') or []
+                    registration_y = get_registration_y(frame_bgr, sprockets)
+
+                    preview_frame = frame_bgr.copy()
+                    if registration_y is not None:
+                        reg_y = int(round(registration_y))
+                        cv2.line(preview_frame, (0, reg_y), (preview_frame.shape[1] - 1, reg_y), (0, 0, 255), 2)
+
+                    existing_crop = settings.get('crop') if isinstance(settings.get('crop'), dict) else None
+                    if existing_crop is not None and registration_y is not None:
+                        x1, y1, x2, y2 = get_relative_crop_rect(frame_bgr, registration_y)
+                        cv2.rectangle(preview_frame, (x1, y1), (x2, y2), (255, 255, 0), 2)
+
+                    preview_height = max(1, int(preview_frame.shape[0] * (preview_width / preview_frame.shape[1])))
+                    preview_frame = cv2.resize(
+                        preview_frame,
+                        (preview_width, preview_height),
+                        interpolation=cv2.INTER_AREA,
+                    )
+                    ok, encoded = cv2.imencode('.jpg', preview_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+                    if not ok:
+                        raise RuntimeError('Failed to encode crop calibration preview')
+
+                    jpg_bytes = encoded.tobytes()
+                    await websocket.send(json.dumps({
+                        'event': 'crop_calibration_preview',
+                        'full_width': int(frame_bgr.shape[1]),
+                        'full_height': int(frame_bgr.shape[0]),
+                        'preview_width': int(preview_width),
+                        'preview_height': int(preview_height),
+                        'registration_y': registration_y,
+                        'existing_crop': existing_crop,
+                        'size': len(jpg_bytes)
+                    }))
+                    await websocket.send(jpg_bytes)
+
+                except Exception as exc:
+                    print(f'[APP] Crop calibration preview failed: {exc}')
+                    await websocket.send(json.dumps({
+                        'event': 'error',
+                        'message': f'Crop calibration preview failed: {exc}'
+                    }))
+
+                finally:
+                    tc.clean_up()
+                    camera.stop()
+
+                continue
+
+            elif event == 'crop_calibration_save':
+                rect = data.get('rect')
+                registration_y = data.get('registration_y')
+                if not isinstance(rect, list) or len(rect) != 4 or registration_y is None:
+                    await websocket.send(json.dumps({
+                        'event': 'error',
+                        'message': 'Invalid crop calibration payload'
+                    }))
+                    continue
+
+                try:
+                    frame_w, frame_h = CALIBRATION_RES
+                    x1 = max(0, min(frame_w - 1, int(rect[0])))
+                    y1 = max(0, min(frame_h - 1, int(rect[1])))
+                    x2 = max(x1 + 1, min(frame_w, int(rect[2])))
+                    y2 = max(y1 + 1, min(frame_h, int(rect[3])))
+                    registration_y = float(registration_y)
+
+                    crop_data = save_crop_settings((x1, y1, x2, y2), registration_y, (frame_w, frame_h))
+                    refresh_runtime_settings()
+
+                    await websocket.send(json.dumps({
+                        'event': 'crop_calibration_saved',
+                        'crop': crop_data
+                    }))
+                except Exception as exc:
+                    print(f'[APP] Crop calibration save failed: {exc}')
+                    await websocket.send(json.dumps({
+                        'event': 'error',
+                        'message': f'Crop calibration save failed: {exc}'
+                    }))
                 continue
 
             elif event == 'calibration_sweep':
