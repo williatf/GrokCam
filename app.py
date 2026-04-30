@@ -850,8 +850,8 @@ detector = SprocketDetector(
     side="left", auto_roi=0.40,
     min_area=settings.get("sprocket_area_min",1500), 
     max_area=settings.get("sprocket_area_max",25000),
-    ar_min=1.2, ar_max=1.8,
-    solidity_min=0.75,
+    ar_min=1.1, ar_max=2.0,
+    solidity_min=0.65,
     blur=5, open_k=5, close_k=3,
     adaptive_block=41, adaptive_C=7,
     method="profile"
@@ -1012,8 +1012,8 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
         calibrated_steps_per_px = float(settings.get("steps_per_px", steps_per_px))
         min_steps = int(nominal_steps_per_pitch * 0.88)
         max_steps = int(nominal_steps_per_pitch * 1.12)
-        correction_gain = 0.18
-        max_correction_steps = 6
+        correction_gain = 0.12
+        max_correction_steps = 4
         target_y = None
         missing_pair_count = 0
 
@@ -1065,15 +1065,10 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
                 steps_before_update = current_steps
                 error_px = float(target_y) - float(registration_y)
                 update_allowed = False
-                if registration_mode == 'pair' and full_count == 2:
+                if registration_mode == 'pair' and full_count == 2 and (partial_count == 0 or abs(error_px) <= 80.0):
                     update_allowed = True
                 elif registration_mode == 'pair' and partial_count > 0:
-                    if abs(error_px) <= 80.0:
-                        update_allowed = True
-                    else:
-                        print(f"[APP] Frame {frame}: ignoring partial pair for step update")
-                if registration_mode == 'single' and abs(error_px) <= 80.0:
-                    update_allowed = True
+                    print(f"[APP] Frame {frame}: ignoring partial pair for step update")
 
                 correction = int(round(error_px * calibrated_steps_per_px * correction_gain))
                 correction = max(-max_correction_steps, min(correction, max_correction_steps))
