@@ -1593,13 +1593,14 @@ async def handle_client(websocket):
                 print("[APP] LED on + camera, stabilizing...")
 
                 steps_per_pitch = STEPS_PER_PITCH
-                for f in range(frames):
-                    if direction > 0:
-                        tc.steps_forward(steps_per_pitch)
-                    else:
-                        tc.steps_back(steps_per_pitch)
-                        #tc.rewind()
-                    #await asyncio.sleep(0.05)
+                total_steps = max(0, frames) * steps_per_pitch
+                if direction > 0:
+                    print(f"[APP] Jogging forward {frames} frames ({total_steps} steps) before alignment")
+                    tc.steps_forward(total_steps)
+                else:
+                    print(f"[APP] Jogging backward {frames} frames ({total_steps} steps) before alignment")
+                    tc.steps_back(total_steps)
+                    #tc.rewind()
 
                 # Capture image after jogging
                 anchor = await advance_to_next_perforation(camera, websocket,
