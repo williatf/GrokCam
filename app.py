@@ -186,6 +186,20 @@ def get_registration_y(frame_bgr, sprockets):
     return None
 
 
+def get_capture_registration(frame_bgr, sprockets):
+    registration = detector.choose_registration(
+        sprockets,
+        frame_bgr.shape,
+        expected_pitch=SPROCKET_PITCH_PX,
+    )
+    mode = registration.get('mode', 'none')
+    actual_y = registration.get('actual_y')
+    return {
+        'registration_y': float(actual_y) if actual_y is not None else None,
+        'mode': mode if mode in ('pair', 'single') else 'none',
+    }
+
+
 def get_relative_crop_rect(frame_bgr, registration_y):
     frame_h, frame_w = frame_bgr.shape[:2]
     crop_settings = settings.get('crop')
@@ -936,9 +950,13 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
     try:
         await asyncio.sleep(2)
 
-        nominal_steps_per_pitch = int(settings.get("steps_per_pitch", 280))
+        nominal_steps_per_pitch = int(settings.get("steps_per_pitch", STEPS_PER_PITCH))
         current_steps = int(settings.get("steps_per_pitch", 280))
         calibrated_steps_per_px = float(settings.get("steps_per_px", steps_per_px))
+        min_steps = int(nominal_steps_per_pitch * 0.88)
+        max_steps = int(nominal_steps_per_pitch * 1.12)
+        correction_gain = 0.25
+        max_correction_steps = 8
         target_y = None
 
         for frame in range(num_frames):
@@ -959,7 +977,9 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
 
             sprockets = detector.detect(frame_bgr, mode="profile")
             debug_frame = draw_sprockets_debug(frame_bgr, sprockets if sprockets else [])
-            registration_y = get_registration_y(frame_bgr, sprockets if sprockets else [])
+            capture_registration = get_capture_registration(frame_bgr, sprockets if sprockets else [])
+            registration_y = capture_registration.get('registration_y')
+            registration_mode = capture_registration.get('mode', 'none')
 
             if target_y is None:
                 target_y = frame_bgr.shape[0] / 2.0
@@ -969,21 +989,28 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
                     f"[APP] Frame {frame}: registration_y unavailable, keeping steps={current_steps}"
                 )
             else:
+                steps_before_update = current_steps
                 error_px = float(target_y) - float(registration_y)
-                gain = 0.4
-                correction = int(round(error_px * calibrated_steps_per_px * gain))
-                max_corr = int(0.2 * nominal_steps_per_pitch)
-                correction = max(min(correction, max_corr), -max_corr)
-                next_steps = current_steps + correction
-                next_steps = max(
-                    int(0.7 * nominal_steps_per_pitch),
-                    min(int(1.3 * nominal_steps_per_pitch), next_steps)
-                )
+                update_allowed = registration_mode == 'pair'
+                if registration_mode == 'single' and abs(error_px) <= 80.0:
+                    update_allowed = True
+
+                correction = int(round(error_px * calibrated_steps_per_px * correction_gain))
+                correction = max(-max_correction_steps, min(correction, max_correction_steps))
+                next_steps = current_steps
+
+                if update_allowed:
+                    next_steps = steps_before_update + correction
+                    next_steps = max(min_steps, min(max_steps, next_steps))
+                    current_steps = next_steps
+                else:
+                    print(f"[APP] Frame {frame}: ignoring low-confidence registration for step update")
+
                 print(
-                    f"[APP] Frame {frame}: reg={registration_y:.1f}, err={error_px:+.1f}px, "
-                    f"steps={current_steps}, next={next_steps}"
+                    f"[APP] Frame {frame}: reg={registration_y:.1f}, mode={registration_mode}, "
+                    f"err={error_px:+.1f}px, steps={steps_before_update}, "
+                    f"correction={correction:+d}, next={next_steps}"
                 )
-                current_steps = next_steps
 
             frame_cropped = crop_frame_relative_to_registration(frame_bgr, registration_y)
             # Flip vertically to correct camera orientation (matches legacy behavior)
