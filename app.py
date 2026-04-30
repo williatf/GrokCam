@@ -1012,10 +1012,11 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
         calibrated_steps_per_px = float(settings.get("steps_per_px", steps_per_px))
         min_steps = int(nominal_steps_per_pitch * 0.88)
         max_steps = int(nominal_steps_per_pitch * 1.12)
-        correction_gain = 0.12
-        max_correction_steps = 4
+        correction_gain = 0.10
         target_y = None
         missing_pair_count = 0
+        trusted_error_history = deque(maxlen=5)
+        trusted_step_history = deque(maxlen=5)
 
         for frame in range(num_frames):
             if stop_event.is_set():
@@ -1064,20 +1065,33 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
             else:
                 steps_before_update = current_steps
                 error_px = float(target_y) - float(registration_y)
-                update_allowed = False
-                if registration_mode == 'pair' and full_count == 2 and (partial_count == 0 or abs(error_px) <= 80.0):
-                    update_allowed = True
-                elif registration_mode == 'pair' and partial_count > 0:
+                update_allowed = registration_mode == 'pair' and full_count == 2
+                if registration_mode == 'pair' and partial_count > 0:
                     print(f"[APP] Frame {frame}: ignoring partial pair for step update")
 
-                correction = int(round(error_px * calibrated_steps_per_px * correction_gain))
-                correction = max(-max_correction_steps, min(correction, max_correction_steps))
+                median_error = None
+                correction = 0
                 next_steps = current_steps
 
                 if update_allowed:
+                    trusted_error_history.append(float(error_px))
+                    if len(trusted_error_history) >= 3:
+                        median_error = float(np.median(np.array(trusted_error_history, dtype=float)))
+                        has_positive = any(value > 0 for value in trusted_error_history)
+                        has_negative = any(value < 0 for value in trusted_error_history)
+                        mixed_signs = has_positive and has_negative
+
+                        if abs(median_error) < 35.0 or mixed_signs:
+                            correction = 0
+                        else:
+                            correction = int(round(median_error * calibrated_steps_per_px * correction_gain))
+                            max_correction_steps = 3 if abs(median_error) > 120.0 else 2
+                            correction = max(-max_correction_steps, min(correction, max_correction_steps))
+
                     next_steps = steps_before_update + correction
                     next_steps = max(min_steps, min(max_steps, next_steps))
                     current_steps = next_steps
+                    trusted_step_history.append(int(current_steps))
                 else:
                     print(
                         f"[APP] Frame {frame}: pair unavailable: count={sprocket_count}, "
@@ -1085,10 +1099,11 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
                     )
                     print(f"[APP] Frame {frame}: ignoring low-confidence registration for step update")
 
+                median_error_text = f"{median_error:+.1f}px" if median_error is not None else "n/a"
                 print(
                     f"[APP] Frame {frame}: reg={registration_y:.1f}, mode={registration_mode}, "
                     f"count={sprocket_count}, full={full_count}, partial={partial_count}, "
-                    f"err={error_px:+.1f}px, steps={steps_before_update}, "
+                    f"err={error_px:+.1f}px, median_error={median_error_text}, steps={steps_before_update}, "
                     f"correction={correction:+d}, next={next_steps}"
                 )
 
@@ -1104,14 +1119,20 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
                 )
                 if reacquire_result.get('valid'):
                     missing_pair_count = 0
-                    current_steps = nominal_steps_per_pitch
+                    if trusted_step_history:
+                        current_steps = int(round(float(np.median(np.array(trusted_step_history, dtype=float)))))
+                    else:
+                        current_steps = nominal_steps_per_pitch
                     print(
                         f"[APP] Reacquire succeeded: steps={reacquire_result.get('steps')}, "
                         f"registration_y={reacquire_result.get('registration_y'):.1f}; "
                         f"resetting current_steps={current_steps}"
                     )
                 else:
-                    current_steps = nominal_steps_per_pitch
+                    if trusted_step_history:
+                        current_steps = int(round(float(np.median(np.array(trusted_step_history, dtype=float)))))
+                    else:
+                        current_steps = nominal_steps_per_pitch
                     print(
                         f"[APP] Reacquire failed: reason={reacquire_result.get('reason')}, "
                         f"steps={reacquire_result.get('steps')}; resetting current_steps={current_steps}"
