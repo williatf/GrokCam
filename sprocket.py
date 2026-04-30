@@ -238,6 +238,7 @@ class SprocketDetector:
 
         contours, _ = cv.findContours(mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
         candidate_dicts = []
+        rejected_dicts = []
 
         for contour in contours:
             contour_area = float(cv.contourArea(contour))
@@ -248,18 +249,36 @@ class SprocketDetector:
             if min(w, h) < 4:
                 continue
 
+            bbox = (
+                x + roi_offset[0],
+                y + roi_offset[1],
+                x + roi_offset[0] + w,
+                y + roi_offset[1] + h,
+            )
+
+            if not self._passes_dimension_gate(w, h):
+                if debug_prefix is not None:
+                    rejected_dicts.append({"bbox": bbox, "reason": "dims"})
+                continue
+
             bbox_area = float(w * h)
             if bbox_area < self.min_area * 0.20 or bbox_area > self.max_area * 2.25:
+                if debug_prefix is not None:
+                    rejected_dicts.append({"bbox": bbox, "reason": "area"})
                 continue
 
             ar = float(w) / float(h) if h > 0 else 0.0
-            if ar < max(0.45, self.ar_min * 0.45) or ar > max(2.5, self.ar_max * 1.8):
+            if ar < self.ar_min or ar > self.ar_max:
+                if debug_prefix is not None:
+                    rejected_dicts.append({"bbox": bbox, "reason": "aspect"})
                 continue
 
             hull = cv.convexHull(contour)
             hull_area = float(cv.contourArea(hull)) if hull is not None else 0.0
             solidity = contour_area / hull_area if hull_area > 0 else 0.0
             if solidity < max(0.15, self.solidity_min * 0.5):
+                if debug_prefix is not None:
+                    rejected_dicts.append({"bbox": bbox, "reason": "solidity"})
                 continue
 
             cx = x + (w / 2.0) + roi_offset[0]
@@ -275,17 +294,14 @@ class SprocketDetector:
                 frame_bgr.shape,
             )
             if score < 0.12:
+                if debug_prefix is not None:
+                    rejected_dicts.append({"bbox": bbox, "reason": "score"})
                 continue
 
             candidate_dicts.append({
                 "tuple": sprocket_tuple,
                 "score": score,
-                "bbox": (
-                    x + roi_offset[0],
-                    y + roi_offset[1],
-                    x + roi_offset[0] + w,
-                    y + roi_offset[1] + h,
-                ),
+                "bbox": bbox,
             })
 
         candidate_dicts = self._dedupe_candidates(candidate_dicts)
@@ -297,6 +313,15 @@ class SprocketDetector:
             edge_margin = self._edge_margin_pixels(roi_h)
             cv.line(dbg, (0, edge_margin), (roi_w - 1, edge_margin), (80, 80, 255), 1)
             cv.line(dbg, (0, roi_h - edge_margin), (roi_w - 1, roi_h - edge_margin), (80, 80, 255), 1)
+            for item in rejected_dicts:
+                x1, y1, x2, y2 = item["bbox"]
+                cv.rectangle(
+                    dbg,
+                    (int(round(x1 - roi_offset[0])), int(round(y1 - roi_offset[1]))),
+                    (int(round(x2 - roi_offset[0])), int(round(y2 - roi_offset[1]))),
+                    (0, 0, 255),
+                    1,
+                )
             for item in candidate_dicts:
                 cx, cy, w, h, _ = item["tuple"]
                 local_cx = cx - roi_offset[0]
@@ -369,6 +394,12 @@ class SprocketDetector:
             cx = (x_left + x_right) / 2.0 + roi_offset[0]
             area = float(w * h)
             ar = float(w) / float(h) if h > 0 else 0.0
+
+            if not self._passes_dimension_gate(w, h):
+                continue
+
+            if ar < self.ar_min or ar > self.ar_max:
+                continue
 
             if not (self.ar_min <= ar <= self.ar_max) and self.expected_ar:
                 h = int(max(1, w / self.expected_ar))
@@ -470,6 +501,13 @@ class SprocketDetector:
             score -= 0.35
 
         return self._clamp01(score)
+
+    def _passes_dimension_gate(self, w, h):
+        if w <= 0 or h <= 0:
+            return False
+        if float(h) > float(w) * 1.25:
+            return False
+        return True
 
     def _touches_vertical_edge(self, cy, h, frame_h, edge_margin_px=None):
         margin = edge_margin_px if edge_margin_px is not None else self._edge_margin_pixels(frame_h)
