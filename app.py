@@ -664,6 +664,115 @@ async def measure_steps_per_pitch_live(camera, tc, detector, sprocket_pitch_px, 
     }
 
 
+async def advance_and_register_frame(camera, tc, detector,
+                                     target_y=None,
+                                     steps_per_pitch=None,
+                                     steps_per_px=None,
+                                     max_corrections=3,
+                                     tolerance_px=4,
+                                     max_correction_frac=0.15):
+    if steps_per_pitch is None or steps_per_px is None:
+        raise ValueError("Calibration values (steps_per_pitch, steps_per_px) required.")
+
+    if target_y is None:
+        frame_h = camera.capture_array("main").shape[0]
+        target_y = frame_h / 2.0
+
+    steps_per_pitch = int(round(float(steps_per_pitch)))
+    steps_per_px = float(steps_per_px)
+    search_step = 5
+    correction_limit = max(1, int(round(steps_per_pitch * float(max_correction_frac))))
+
+    print(
+        f"[APP] Registration advance start: target_y={target_y:.1f}, "
+        f"steps_per_pitch={steps_per_pitch}, tolerance_px={tolerance_px}, "
+        f"max_corrections={max_corrections}"
+    )
+
+    tc.steps_forward(steps_per_pitch)
+    await asyncio.sleep(0.05)
+
+    for correction_index in range(max(0, int(max_corrections))):
+        buffer = io.BytesIO()
+        camera.capture_file(buffer, format='jpeg')
+        frame_bgr = cv2.imdecode(np.frombuffer(buffer.getvalue(), np.uint8), cv2.IMREAD_COLOR)
+        if frame_bgr is None:
+            print(f"[APP] Registration correction {correction_index + 1}: failed to decode frame")
+            continue
+
+        sprockets = detector.detect(frame_bgr, mode='profile') or []
+        registration_y = get_registration_y(frame_bgr, sprockets)
+
+        if registration_y is None:
+            print(
+                f"[APP] Registration correction {correction_index + 1}: "
+                f"registration_y unavailable, searching forward {search_step} steps"
+            )
+            tc.steps_forward(search_step)
+            await asyncio.sleep(0.05)
+            continue
+
+        error_px = float(target_y) - float(registration_y)
+        print(
+            f"[APP] Registration correction {correction_index + 1}: "
+            f"target_y={target_y:.1f}, registration_y={registration_y:.1f}, error_px={error_px:+.1f}"
+        )
+
+        if abs(error_px) <= float(tolerance_px):
+            return {
+                'valid': True,
+                'registration_y': float(registration_y),
+                'target_y': float(target_y),
+                'error_px': float(error_px),
+                'steps_per_pitch': int(steps_per_pitch),
+            }
+
+        correction_steps = int(round(error_px * steps_per_px))
+        correction_steps = max(-correction_limit, min(correction_steps, correction_limit))
+        print(
+            f"[APP] Registration correction {correction_index + 1}: correction_steps={correction_steps:+d}"
+        )
+
+        if correction_steps > 0:
+            tc.steps_forward(correction_steps)
+        elif correction_steps < 0:
+            tc.steps_back(abs(correction_steps))
+        else:
+            print(f"[APP] Registration correction {correction_index + 1}: zero-step correction")
+
+        await asyncio.sleep(0.05)
+
+    buffer = io.BytesIO()
+    camera.capture_file(buffer, format='jpeg')
+    frame_bgr = cv2.imdecode(np.frombuffer(buffer.getvalue(), np.uint8), cv2.IMREAD_COLOR)
+    if frame_bgr is None:
+        return {
+            'valid': False,
+            'reason': 'failed_to_decode_final_registration_frame',
+        }
+
+    sprockets = detector.detect(frame_bgr, mode='profile') or []
+    registration_y = get_registration_y(frame_bgr, sprockets)
+    if registration_y is None:
+        return {
+            'valid': False,
+            'reason': 'registration_not_found_after_corrections',
+        }
+
+    error_px = float(target_y) - float(registration_y)
+    print(
+        f"[APP] Registration final: target_y={target_y:.1f}, "
+        f"registration_y={registration_y:.1f}, error_px={error_px:+.1f}"
+    )
+    return {
+        'valid': True,
+        'registration_y': float(registration_y),
+        'target_y': float(target_y),
+        'error_px': float(error_px),
+        'steps_per_pitch': int(steps_per_pitch),
+    }
+
+
 apply_capture_camera_controls()
 
 detector = SprocketDetector(
@@ -835,23 +944,27 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
                 print("[APP] Stop requested, leaving capture loop")
                 break
 
-            advance_result = await advance_to_next_perforation(
+            advance_result = await advance_and_register_frame(
                 camera,
-                websocket,
+                tc,
+                detector,
                 steps_per_pitch=current_steps_per_pitch,
                 steps_per_px=current_steps_per_px
             )
-            if not advance_result:
+            if not advance_result or not advance_result.get('valid'):
                 await websocket.send(json.dumps({
                     'event': 'error',
-                    'message': f'Failed to align frame {frame}'
+                    'message': f"Failed to align frame {frame}: {advance_result.get('reason', 'unknown_alignment_error') if isinstance(advance_result, dict) else 'unknown_alignment_error'}"
                 }))
                 break
-            anchor_cx, anchor_cy, new_nominal = advance_result
-            if new_nominal:
-                current_steps_per_pitch = new_nominal
-                current_steps_per_px = current_steps_per_pitch / SPROCKET_PITCH_PX
-                print(f"[APP] Updated steps_per_pitch for next frame: {current_steps_per_pitch}")
+
+            aligned_registration_y = advance_result.get('registration_y')
+            current_steps_per_pitch = int(advance_result.get('steps_per_pitch', current_steps_per_pitch))
+            current_steps_per_px = current_steps_per_pitch / SPROCKET_PITCH_PX
+            print(
+                f"[APP] Frame {frame} aligned: target_y={advance_result.get('target_y')}, "
+                f"registration_y={aligned_registration_y}, error_px={advance_result.get('error_px')}"
+            )
 
             buffer = io.BytesIO()
             camera.capture_file(buffer, format='jpeg')
@@ -864,6 +977,8 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
             sprockets = detector.detect(frame_bgr, mode="profile")
             debug_frame = draw_sprockets_debug(frame_bgr, sprockets if sprockets else [])
             registration_y = get_registration_y(frame_bgr, sprockets if sprockets else [])
+            if registration_y is None:
+                registration_y = aligned_registration_y
             frame_cropped = crop_frame_relative_to_registration(frame_bgr, registration_y)
             # Flip vertically to correct camera orientation (matches legacy behavior)
             frame_cropped = cv2.flip(frame_cropped, 0)
