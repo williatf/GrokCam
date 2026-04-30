@@ -955,8 +955,8 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
         calibrated_steps_per_px = float(settings.get("steps_per_px", steps_per_px))
         min_steps = int(nominal_steps_per_pitch * 0.88)
         max_steps = int(nominal_steps_per_pitch * 1.12)
-        correction_gain = 0.25
-        max_correction_steps = 8
+        correction_gain = 0.18
+        max_correction_steps = 6
         target_y = None
 
         for frame in range(num_frames):
