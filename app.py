@@ -200,7 +200,7 @@ def get_capture_registration(frame_bgr, sprockets):
     }
 
 
-async def reacquire_pair_registration(camera, tc, detector, step_size=10, max_steps=300):
+async def reacquire_pair_registration(camera, tc, detector, target_y, step_size=10, max_steps=300, reacquire_tolerance_px=80):
     total_steps = 0
 
     while total_steps <= max_steps:
@@ -221,6 +221,18 @@ async def reacquire_pair_registration(camera, tc, detector, step_size=10, max_st
         registration = get_capture_registration(frame_bgr, sprockets)
 
         if registration.get('mode') == 'pair' and registration.get('registration_y') is not None:
+            error_px = float(target_y) - float(registration.get('registration_y'))
+            print(
+                f"[APP] Reacquire candidate: steps={total_steps}, "
+                f"registration_y={registration.get('registration_y'):.1f}, error={error_px:+.1f}"
+            )
+            if abs(error_px) > float(reacquire_tolerance_px):
+                if total_steps >= max_steps:
+                    break
+                tc.steps_forward(step_size)
+                total_steps += step_size
+                await asyncio.sleep(0.05)
+                continue
             return {
                 'valid': True,
                 'registration_y': registration.get('registration_y'),
@@ -240,7 +252,7 @@ async def reacquire_pair_registration(camera, tc, detector, step_size=10, max_st
 
     return {
         'valid': False,
-        'reason': 'pair_registration_not_found',
+        'reason': 'pair_registration_not_found_within_tolerance',
         'steps': total_steps,
     }
 
@@ -1052,7 +1064,14 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
             else:
                 steps_before_update = current_steps
                 error_px = float(target_y) - float(registration_y)
-                update_allowed = registration_mode == 'pair'
+                update_allowed = False
+                if registration_mode == 'pair' and full_count == 2:
+                    update_allowed = True
+                elif registration_mode == 'pair' and partial_count > 0:
+                    if abs(error_px) <= 80.0:
+                        update_allowed = True
+                    else:
+                        print(f"[APP] Frame {frame}: ignoring partial pair for step update")
                 if registration_mode == 'single' and abs(error_px) <= 80.0:
                     update_allowed = True
 
@@ -1084,6 +1103,7 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
                     camera,
                     tc,
                     detector,
+                    target_y,
                     step_size=10,
                     max_steps=300,
                 )
