@@ -74,13 +74,28 @@ class tcControl:
     def steps_back(self, steps=1):
         wiringpi.digitalWrite(self.STEPPER_PINS[1], 0) #direction backwards
         wiringpi.digitalWrite(self.STEPPER_PINS2[1], 0)
+        pusher_counter = 0.0
+
         for _ in range(steps):
-            wiringpi.digitalWrite(self.STEPPER_PINS[0], 1)
+            pusher_counter += self.PUSHER_RATIO
+            pusher_step = pusher_counter >= 1.0
+
             wiringpi.digitalWrite(self.STEPPER_PINS2[0], 1)
-            time.sleep(0.002)
-            wiringpi.digitalWrite(self.STEPPER_PINS[0], 0)
+            if pusher_step:
+                wiringpi.digitalWrite(self.STEPPER_PINS[0], 1)
+                pusher_counter -= 1.0
+
+            time.sleep(0.000001)
+
             wiringpi.digitalWrite(self.STEPPER_PINS2[0], 0)
-            time.sleep(0.002)
+            if pusher_step:
+                wiringpi.digitalWrite(self.STEPPER_PINS[0], 0)
+
+            self.steps_taken += 1
+            if self.steps_taken >= 550:
+                self.takeup_pulse()
+                self.steps_taken = 0
+
         wiringpi.digitalWrite(self.STEPPER_PINS[1], 1) #direction back to foward
         wiringpi.digitalWrite(self.STEPPER_PINS2[1], 1)
 
