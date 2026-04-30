@@ -1035,15 +1035,17 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
             else:
                 missing_pair_count += 1
 
-            print(
-                f"[APP] Frame {frame}: sprocket_count={len(sprockets) if sprockets else 0}, "
-                f"full_count={full_count}, partial_count={partial_count}, mode={registration_mode}"
-            )
+            sprocket_count = len(sprockets) if sprockets else 0
 
             if target_y is None:
                 target_y = frame_bgr.shape[0] / 2.0
 
             if registration_y is None:
+                if registration_mode != 'pair':
+                    print(
+                        f"[APP] Frame {frame}: pair unavailable: count={sprocket_count}, "
+                        f"full={full_count}, partial={partial_count}, mode={registration_mode}"
+                    )
                 print(
                     f"[APP] Frame {frame}: registration_y unavailable, keeping steps={current_steps}"
                 )
@@ -1063,10 +1065,15 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
                     next_steps = max(min_steps, min(max_steps, next_steps))
                     current_steps = next_steps
                 else:
+                    print(
+                        f"[APP] Frame {frame}: pair unavailable: count={sprocket_count}, "
+                        f"full={full_count}, partial={partial_count}, mode={registration_mode}"
+                    )
                     print(f"[APP] Frame {frame}: ignoring low-confidence registration for step update")
 
                 print(
                     f"[APP] Frame {frame}: reg={registration_y:.1f}, mode={registration_mode}, "
+                    f"count={sprocket_count}, full={full_count}, partial={partial_count}, "
                     f"err={error_px:+.1f}px, steps={steps_before_update}, "
                     f"correction={correction:+d}, next={next_steps}"
                 )
