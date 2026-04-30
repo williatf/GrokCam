@@ -936,35 +936,18 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
     try:
         await asyncio.sleep(2)
 
-        current_steps_per_pitch = settings.get("steps_per_pitch", 280)
-        current_steps_per_px = settings.get("steps_per_px", steps_per_px)
+        nominal_steps_per_pitch = int(settings.get("steps_per_pitch", 280))
+        current_steps = int(settings.get("steps_per_pitch", 280))
+        calibrated_steps_per_px = float(settings.get("steps_per_px", steps_per_px))
+        target_y = None
 
         for frame in range(num_frames):
             if stop_event.is_set():
                 print("[APP] Stop requested, leaving capture loop")
                 break
 
-            advance_result = await advance_and_register_frame(
-                camera,
-                tc,
-                detector,
-                steps_per_pitch=current_steps_per_pitch,
-                steps_per_px=current_steps_per_px
-            )
-            if not advance_result or not advance_result.get('valid'):
-                await websocket.send(json.dumps({
-                    'event': 'error',
-                    'message': f"Failed to align frame {frame}: {advance_result.get('reason', 'unknown_alignment_error') if isinstance(advance_result, dict) else 'unknown_alignment_error'}"
-                }))
-                break
-
-            aligned_registration_y = advance_result.get('registration_y')
-            current_steps_per_pitch = int(advance_result.get('steps_per_pitch', current_steps_per_pitch))
-            current_steps_per_px = current_steps_per_pitch / SPROCKET_PITCH_PX
-            print(
-                f"[APP] Frame {frame} aligned: target_y={advance_result.get('target_y')}, "
-                f"registration_y={aligned_registration_y}, error_px={advance_result.get('error_px')}"
-            )
+            tc.steps_forward(current_steps)
+            await asyncio.sleep(0.05)
 
             buffer = io.BytesIO()
             camera.capture_file(buffer, format='jpeg')
@@ -977,8 +960,31 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
             sprockets = detector.detect(frame_bgr, mode="profile")
             debug_frame = draw_sprockets_debug(frame_bgr, sprockets if sprockets else [])
             registration_y = get_registration_y(frame_bgr, sprockets if sprockets else [])
+
+            if target_y is None:
+                target_y = frame_bgr.shape[0] / 2.0
+
             if registration_y is None:
-                registration_y = aligned_registration_y
+                print(
+                    f"[APP] Frame {frame}: registration_y unavailable, keeping steps={current_steps}"
+                )
+            else:
+                error_px = float(target_y) - float(registration_y)
+                gain = 0.4
+                correction = int(round(error_px * calibrated_steps_per_px * gain))
+                max_corr = int(0.2 * nominal_steps_per_pitch)
+                correction = max(min(correction, max_corr), -max_corr)
+                next_steps = current_steps + correction
+                next_steps = max(
+                    int(0.7 * nominal_steps_per_pitch),
+                    min(int(1.3 * nominal_steps_per_pitch), next_steps)
+                )
+                print(
+                    f"[APP] Frame {frame}: reg={registration_y:.1f}, err={error_px:+.1f}px, "
+                    f"steps={current_steps}, next={next_steps}"
+                )
+                current_steps = next_steps
+
             frame_cropped = crop_frame_relative_to_registration(frame_bgr, registration_y)
             # Flip vertically to correct camera orientation (matches legacy behavior)
             frame_cropped = cv2.flip(frame_cropped, 0)
@@ -1289,6 +1295,7 @@ async def handle_client(websocket):
                         'full_height': int(frame_bgr.shape[0]),
                         'preview_width': int(preview_width),
                         'preview_height': int(preview_height),
+                        'display_flipped_vertical': True,
                         'registration_y': registration_y,
                         'existing_crop': existing_crop,
                         'size': len(jpg_bytes)
@@ -1310,8 +1317,9 @@ async def handle_client(websocket):
 
             elif event == 'crop_calibration_save':
                 rect = data.get('rect')
+                preview_rect = data.get('preview_rect')
                 registration_y = data.get('registration_y')
-                if not isinstance(rect, list) or len(rect) != 4 or registration_y is None:
+                if registration_y is None:
                     await websocket.send(json.dumps({
                         'event': 'error',
                         'message': 'Invalid crop calibration payload'
@@ -1320,10 +1328,48 @@ async def handle_client(websocket):
 
                 try:
                     frame_w, frame_h = CALIBRATION_RES
-                    x1 = max(0, min(frame_w - 1, int(rect[0])))
-                    y1 = max(0, min(frame_h - 1, int(rect[1])))
-                    x2 = max(x1 + 1, min(frame_w, int(rect[2])))
-                    y2 = max(y1 + 1, min(frame_h, int(rect[3])))
+
+                    if isinstance(preview_rect, list) and len(preview_rect) == 4:
+                        preview_width = int(data.get('preview_width', 0))
+                        preview_height = int(data.get('preview_height', 0))
+                        if preview_width <= 0 or preview_height <= 0:
+                            raise ValueError('Missing preview dimensions for crop calibration save')
+
+                        display_flipped_vertical = bool(data.get('display_flipped_vertical', False))
+                        scale_x = float(frame_w) / float(preview_width)
+                        scale_y = float(frame_h) / float(preview_height)
+
+                        preview_x1 = float(preview_rect[0])
+                        preview_y1 = float(preview_rect[1])
+                        preview_x2 = float(preview_rect[2])
+                        preview_y2 = float(preview_rect[3])
+
+                        raw_x1 = preview_x1 * scale_x
+                        raw_x2 = preview_x2 * scale_x
+                        if display_flipped_vertical:
+                            raw_y1 = float(frame_h) - (preview_y2 * scale_y)
+                            raw_y2 = float(frame_h) - (preview_y1 * scale_y)
+                        else:
+                            raw_y1 = preview_y1 * scale_y
+                            raw_y2 = preview_y2 * scale_y
+
+                        x1_raw = min(raw_x1, raw_x2)
+                        x2_raw = max(raw_x1, raw_x2)
+                        y1_raw = min(raw_y1, raw_y2)
+                        y2_raw = max(raw_y1, raw_y2)
+
+                        x1 = max(0, min(frame_w - 1, int(round(x1_raw))))
+                        y1 = max(0, min(frame_h - 1, int(round(y1_raw))))
+                        x2 = max(x1 + 1, min(frame_w, int(round(x2_raw))))
+                        y2 = max(y1 + 1, min(frame_h, int(round(y2_raw))))
+                    elif isinstance(rect, list) and len(rect) == 4:
+                        x1 = max(0, min(frame_w - 1, int(rect[0])))
+                        y1 = max(0, min(frame_h - 1, int(rect[1])))
+                        x2 = max(x1 + 1, min(frame_w, int(rect[2])))
+                        y2 = max(y1 + 1, min(frame_h, int(rect[3])))
+                    else:
+                        raise ValueError('Missing crop rectangle for crop calibration save')
+
                     registration_y = float(registration_y)
 
                     crop_data = save_crop_settings((x1, y1, x2, y2), registration_y, (frame_w, frame_h))
