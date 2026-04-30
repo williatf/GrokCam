@@ -557,6 +557,46 @@ async def tune_calibration_exposure(camera, detector, target=225, percentile=99.
     }
 
 
+async def seek_two_full_sprockets(camera, tc, detector, step_size=10, max_steps=500, settle_delay=0.05):
+    total_steps = 0
+
+    while total_steps <= max_steps:
+        buffer = io.BytesIO()
+        camera.capture_file(buffer, format='jpeg')
+        frame_bgr = cv2.imdecode(np.frombuffer(buffer.getvalue(), np.uint8), cv2.IMREAD_COLOR)
+        if frame_bgr is None:
+            return {
+                'valid': False,
+                'reason': 'failed_to_decode_seek_frame',
+                'steps': total_steps,
+            }
+
+        sprockets = detector.detect(frame_bgr, mode='profile') or []
+        classified = detector.classify_sprockets(sprockets, frame_bgr.shape)
+        full_sprocket_count = sum(1 for item in classified if item.get('status') == 'full')
+
+        if full_sprocket_count == 2:
+            return {
+                'valid': True,
+                'steps': total_steps,
+                'full_sprocket_count': 2,
+                'sprocket_count': len(sprockets),
+            }
+
+        if total_steps >= max_steps:
+            break
+
+        tc.steps_forward(step_size)
+        total_steps += step_size
+        await asyncio.sleep(settle_delay)
+
+    return {
+        'valid': False,
+        'reason': 'did_not_find_two_full_sprockets',
+        'steps': total_steps,
+    }
+
+
 async def measure_steps_per_pitch_live(camera, tc, detector, sprocket_pitch_px, step_chunk=20, max_steps=500):
     def choose_reference_y(frame_bgr, sprockets):
         # Motor calibration must follow one physical sprocket, not a pair midpoint.
@@ -1202,6 +1242,7 @@ async def handle_client(websocket):
 
                 total_samples = max(1, int(data.get('samples', 10)))
                 step_size = int(data.get('step_size', 25))
+                seek_step_size = int(data.get('seek_step_size', 10))
                 debug_scale = float(data.get('debug_scale', 1.0))
                 sweep_samples = []
                 motor_runs = []
@@ -1216,6 +1257,26 @@ async def handle_client(websocket):
                     print("[APP] LED on + camera, stabilizing for calibration sweep...")
                     await asyncio.sleep(0.5)
                     exposure_result = await tune_calibration_exposure(camera, detector)
+                    seek_result = await seek_two_full_sprockets(
+                        camera,
+                        tc,
+                        detector,
+                        step_size=seek_step_size,
+                        max_steps=500,
+                        settle_delay=0.05,
+                    )
+                    if not seek_result.get('valid'):
+                        await websocket.send(json.dumps({
+                            'event': 'calibration_error',
+                            'message': 'Could not find two full sprockets before calibration',
+                            'seek': seek_result
+                        }))
+                        continue
+
+                    await websocket.send(json.dumps({
+                        'event': 'info',
+                        'message': 'Found two full sprockets; starting calibration sweep'
+                    }))
 
                     for sample_index in range(total_samples):
                         measurement, jpg_bytes = calibrator.capture_sprocket_preview(debug_scale)
@@ -1291,6 +1352,7 @@ async def handle_client(websocket):
                     latest_proposed_calibration = proposed_calibration
                     latest_can_save = can_save
                     latest_save_block_reason = save_block_reason
+                    summary['seek'] = seek_result
                     summary['exposure'] = exposure_result
                     summary['motor_steps_per_pitch'] = motor_steps_per_pitch
                     summary['motor_valid_runs'] = motor_valid_runs
