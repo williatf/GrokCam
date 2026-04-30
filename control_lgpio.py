@@ -24,6 +24,8 @@ class tcControl:
     take_up_steps = take_up_counter = 550
     tension_steps = 50
     step_counter = 0
+    advance_settle_delay = 0.01
+    post_takeup_settle_delay = 0.01
 
     def __init__(self):
         self.h_spi = lgpio.spi_open(0)  # SPI channel 0
@@ -64,13 +66,15 @@ class tcControl:
     def steps_forward(self, steps=1):
         if not self.direction:
             self.change_direction(True)
+        original_steps = steps
         m1step = self.m1.step
         m2step = self.m2.step
+        takeup_pulses = 0
         while steps > 1:
             steps -= 1
             self.take_up_counter -= 1
             if self.take_up_counter == 1:
-                self.reel2.pulse()
+                takeup_pulses += 1
                 self.take_up_counter = self.take_up_steps
             if self.step_counter > 0:
                 m1step()
@@ -78,17 +82,20 @@ class tcControl:
             else:
                 self.step_counter = self.tension_steps
             m2step()
+        self._run_deferred_takeup(self.reel2, takeup_pulses, original_steps)
 
     def steps_back(self, steps=1):
         if self.direction:
             self.change_direction(False)
+        original_steps = steps
         m1step = self.m1.step
         m2step = self.m2.step
+        takeup_pulses = 0
         while steps > 1:
             steps -= 1
             self.take_up_counter -= 1
             if self.take_up_counter == 0:
-                self.reel1.pulse()
+                takeup_pulses += 1
                 self.take_up_counter = self.take_up_steps
             if self.step_counter > 0:
                 m2step()
@@ -96,6 +103,19 @@ class tcControl:
             else:
                 self.step_counter = self.tension_steps
             m1step()
+        self._run_deferred_takeup(self.reel1, takeup_pulses, original_steps)
+
+    def _run_deferred_takeup(self, reel, takeup_pulses, advance_steps):
+        print(f"[APP] Advance complete: steps={advance_steps}")
+        time.sleep(self.advance_settle_delay)
+        if takeup_pulses <= 0:
+            return
+
+        print(f"[APP] Running deferred take-up: steps={takeup_pulses * self.take_up_steps}")
+        for _ in range(takeup_pulses):
+            reel.pulse()
+        print("[APP] Deferred take-up complete")
+        time.sleep(self.post_takeup_settle_delay)
 
     def tension_film(self, steps=200):
         d = self.direction

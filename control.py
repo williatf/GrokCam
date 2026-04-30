@@ -34,6 +34,9 @@ class tcControl:
         wiringpi.digitalWrite(self.STEPPER_PINS2[1], 1) #direction forward
 
         self.PUSHER_RATIO = 0.98 # push ~2% less than pull
+    self.TAKEUP_INTERVAL = 550
+    self.ADVANCE_SETTLE_DELAY = 0.01
+    self.POST_TAKEUP_SETTLE_DELAY = 0.01
 
     def light_on(self):
         wiringpi.digitalWrite(self.LED_PIN, 1)
@@ -45,6 +48,7 @@ class tcControl:
         # Puller is master, always moves
         # Pusher moves according to PUSHER_RATIO
         pusher_counter = 0.0
+        takeup_pulses = 0
 
         for _ in range(steps):
             # Decide if pusher should move this step
@@ -67,14 +71,17 @@ class tcControl:
             #time.sleep(0.001)
 
             self.steps_taken += 1
-            if self.steps_taken >= 550:
-                self.takeup_pulse()
-                self.steps_taken = 0
+            if self.steps_taken >= self.TAKEUP_INTERVAL:
+                takeup_pulses += 1
+                self.steps_taken -= self.TAKEUP_INTERVAL
+
+        self._run_deferred_takeup(steps, takeup_pulses)
 
     def steps_back(self, steps=1):
         wiringpi.digitalWrite(self.STEPPER_PINS[1], 0) #direction backwards
         wiringpi.digitalWrite(self.STEPPER_PINS2[1], 0)
         pusher_counter = 0.0
+        takeup_pulses = 0
 
         for _ in range(steps):
             pusher_counter += self.PUSHER_RATIO
@@ -92,12 +99,26 @@ class tcControl:
                 wiringpi.digitalWrite(self.STEPPER_PINS[0], 0)
 
             self.steps_taken += 1
-            if self.steps_taken >= 550:
-                self.takeup_pulse()
-                self.steps_taken = 0
+            if self.steps_taken >= self.TAKEUP_INTERVAL:
+                takeup_pulses += 1
+                self.steps_taken -= self.TAKEUP_INTERVAL
 
         wiringpi.digitalWrite(self.STEPPER_PINS[1], 1) #direction back to foward
         wiringpi.digitalWrite(self.STEPPER_PINS2[1], 1)
+        self._run_deferred_takeup(steps, takeup_pulses)
+
+    def _run_deferred_takeup(self, advance_steps, takeup_pulses):
+        print(f"[APP] Advance complete: steps={advance_steps}")
+        time.sleep(self.ADVANCE_SETTLE_DELAY)
+        if takeup_pulses <= 0:
+            return
+
+        deferred_steps = takeup_pulses * self.TAKEUP_INTERVAL
+        print(f"[APP] Running deferred take-up: steps={deferred_steps}")
+        for _ in range(takeup_pulses):
+            self.takeup_pulse()
+        print("[APP] Deferred take-up complete")
+        time.sleep(self.POST_TAKEUP_SETTLE_DELAY)
 
     def takeup_pulse(self):
         for pin in self.TAKEUP_PINS:
