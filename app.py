@@ -200,6 +200,51 @@ def get_capture_registration(frame_bgr, sprockets):
     }
 
 
+async def reacquire_pair_registration(camera, tc, detector, step_size=10, max_steps=300):
+    total_steps = 0
+
+    while total_steps <= max_steps:
+        buffer = io.BytesIO()
+        camera.capture_file(buffer, format='jpeg')
+        frame_bgr = cv2.imdecode(np.frombuffer(buffer.getvalue(), np.uint8), cv2.IMREAD_COLOR)
+        if frame_bgr is None:
+            return {
+                'valid': False,
+                'reason': 'failed_to_decode_reacquire_frame',
+                'steps': total_steps,
+            }
+
+        sprockets = detector.detect(frame_bgr, mode='profile') or []
+        classified = detector.classify_sprockets(sprockets, frame_bgr.shape)
+        full_count = sum(1 for item in classified if item.get('status') == 'full')
+        partial_count = sum(1 for item in classified if item.get('status') == 'partial')
+        registration = get_capture_registration(frame_bgr, sprockets)
+
+        if registration.get('mode') == 'pair' and registration.get('registration_y') is not None:
+            return {
+                'valid': True,
+                'registration_y': registration.get('registration_y'),
+                'mode': 'pair',
+                'steps': total_steps,
+                'sprocket_count': len(sprockets),
+                'full_count': full_count,
+                'partial_count': partial_count,
+            }
+
+        if total_steps >= max_steps:
+            break
+
+        tc.steps_forward(step_size)
+        total_steps += step_size
+        await asyncio.sleep(0.05)
+
+    return {
+        'valid': False,
+        'reason': 'pair_registration_not_found',
+        'steps': total_steps,
+    }
+
+
 def get_relative_crop_rect(frame_bgr, registration_y):
     frame_h, frame_w = frame_bgr.shape[:2]
     crop_settings = settings.get('crop')
@@ -958,6 +1003,7 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
         correction_gain = 0.18
         max_correction_steps = 6
         target_y = None
+        missing_pair_count = 0
 
         for frame in range(num_frames):
             if stop_event.is_set():
@@ -977,9 +1023,22 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
 
             sprockets = detector.detect(frame_bgr, mode="profile")
             debug_frame = draw_sprockets_debug(frame_bgr, sprockets if sprockets else [])
+            classified_sprockets = detector.classify_sprockets(sprockets if sprockets else [], frame_bgr.shape)
+            full_count = sum(1 for item in classified_sprockets if item.get('status') == 'full')
+            partial_count = sum(1 for item in classified_sprockets if item.get('status') == 'partial')
             capture_registration = get_capture_registration(frame_bgr, sprockets if sprockets else [])
             registration_y = capture_registration.get('registration_y')
             registration_mode = capture_registration.get('mode', 'none')
+
+            if registration_mode == 'pair':
+                missing_pair_count = 0
+            else:
+                missing_pair_count += 1
+
+            print(
+                f"[APP] Frame {frame}: sprocket_count={len(sprockets) if sprockets else 0}, "
+                f"full_count={full_count}, partial_count={partial_count}, mode={registration_mode}"
+            )
 
             if target_y is None:
                 target_y = frame_bgr.shape[0] / 2.0
@@ -1011,6 +1070,30 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
                     f"err={error_px:+.1f}px, steps={steps_before_update}, "
                     f"correction={correction:+d}, next={next_steps}"
                 )
+
+            if missing_pair_count >= 3:
+                print("[APP] Pair registration lost; attempting reacquire")
+                reacquire_result = await reacquire_pair_registration(
+                    camera,
+                    tc,
+                    detector,
+                    step_size=10,
+                    max_steps=300,
+                )
+                if reacquire_result.get('valid'):
+                    missing_pair_count = 0
+                    current_steps = nominal_steps_per_pitch
+                    print(
+                        f"[APP] Reacquire succeeded: steps={reacquire_result.get('steps')}, "
+                        f"registration_y={reacquire_result.get('registration_y'):.1f}; "
+                        f"resetting current_steps={current_steps}"
+                    )
+                else:
+                    current_steps = nominal_steps_per_pitch
+                    print(
+                        f"[APP] Reacquire failed: reason={reacquire_result.get('reason')}, "
+                        f"steps={reacquire_result.get('steps')}; resetting current_steps={current_steps}"
+                    )
 
             frame_cropped = crop_frame_relative_to_registration(frame_bgr, registration_y)
             # Flip vertically to correct camera orientation (matches legacy behavior)
