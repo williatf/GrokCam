@@ -1008,7 +1008,13 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
         await asyncio.sleep(2)
 
         nominal_steps_per_pitch = int(settings.get("steps_per_pitch", STEPS_PER_PITCH))
-        current_steps = int(settings.get("steps_per_pitch", 280))
+        calibrated_steps_per_px = float(settings.get("steps_per_px", steps_per_px))
+        base_steps = nominal_steps_per_pitch
+        pixels_per_step = 1.0 / calibrated_steps_per_px if calibrated_steps_per_px > 0 else 9.0
+        current_steps = base_steps
+        gain = 0.4
+        max_correction = 6
+        DEAD_BAND_PX = 10
         min_steps = int(nominal_steps_per_pitch * 0.88)
         max_steps = int(nominal_steps_per_pitch * 1.12)
         target_y = None
@@ -1052,60 +1058,53 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
             if target_y is None:
                 target_y = frame_bgr.shape[0] / 2.0
 
+            steps_before_update = current_steps
+
             if registration_y is None:
+                next_steps = max(min_steps, min(max_steps, base_steps))
+                current_steps = next_steps
                 if registration_mode != 'pair':
                     print(
                         f"[APP] Frame {frame}: pair unavailable: count={sprocket_count}, "
                         f"full={full_count}, partial={partial_count}, mode={registration_mode}"
                     )
                 print(
-                    f"[APP] Frame {frame}: registration_y unavailable, keeping steps={current_steps}"
+                    f"[APP] Frame {frame}: reg=n/a, mode={registration_mode}, count={sprocket_count}, "
+                    f"full={full_count}, partial={partial_count}, err=n/a, steps={steps_before_update}, correction=+0, next={next_steps}"
                 )
             else:
-                steps_before_update = current_steps
                 error_px = float(target_y) - float(registration_y)
-                previous_pair_error_before = previous_valid_pair_error
                 update_allowed = registration_mode == 'pair' and full_count == 2 and partial_count == 0
                 if registration_mode == 'pair' and partial_count > 0:
                     print(f"[APP] Frame {frame}: ignoring partial pair for step update")
 
                 correction = 0
-                next_steps = current_steps
+                next_steps = max(min_steps, min(max_steps, base_steps))
 
                 if update_allowed:
-                    if freeze_after_reacquire:
-                        correction = 0
-                        freeze_after_reacquire = False
-                    elif previous_pair_error_before is not None and ((previous_pair_error_before > 0 > error_px) or (previous_pair_error_before < 0 < error_px)):
+                    abs_error = abs(error_px)
+                    if abs_error <= DEAD_BAND_PX:
                         correction = 0
                     else:
-                        abs_error = abs(error_px)
-                        if abs_error < 25.0:
-                            correction = 0
-                        elif abs_error < 60.0:
-                            correction = 1 if error_px > 0 else -1
-                        elif abs_error < 120.0:
-                            correction = 2 if error_px > 0 else -2
-                        else:
-                            correction = 3 if error_px > 0 else -3
+                        correction = int(round((error_px / pixels_per_step) * gain))
+                        correction = max(-max_correction, min(max_correction, correction))
 
-                    next_steps = steps_before_update + correction
+                    next_steps = base_steps + correction
                     next_steps = max(min_steps, min(max_steps, next_steps))
                     current_steps = next_steps
-                    previous_valid_pair_error = float(error_px)
                     trusted_step_history.append(int(current_steps))
                 else:
+                    current_steps = next_steps
                     print(
                         f"[APP] Frame {frame}: pair unavailable: count={sprocket_count}, "
                         f"full={full_count}, partial={partial_count}, mode={registration_mode}"
                     )
                     print(f"[APP] Frame {frame}: ignoring low-confidence registration for step update")
 
-                prev_error_text = f"{previous_pair_error_before:+.1f}px" if previous_pair_error_before is not None else "n/a"
                 print(
                     f"[APP] Frame {frame}: reg={registration_y:.1f}, mode={registration_mode}, "
                     f"count={sprocket_count}, full={full_count}, partial={partial_count}, "
-                    f"err={error_px:+.1f}px, prev_err={prev_error_text}, freeze_after_reacquire={freeze_after_reacquire}, steps={steps_before_update}, "
+                    f"err={error_px:+.1f}px, steps={steps_before_update}, "
                     f"correction={correction:+d}, next={next_steps}"
                 )
 
