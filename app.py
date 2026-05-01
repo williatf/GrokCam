@@ -1295,6 +1295,12 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
             header = len(cropped_bytes).to_bytes(4, 'big')
             payload = header + cropped_bytes + debug_bytes
             await websocket.send(payload)
+            await websocket.send(json.dumps({
+                'event': 'info',
+                'message': f'Image {frame + 1} of {num_frames}',
+                'frame_index': frame + 1,
+                'frame_total': num_frames,
+            }))
             print(f"[APP] Frame {frame}: sent {len(payload)} bytes to client")
 
 
