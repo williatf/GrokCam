@@ -13,6 +13,7 @@ from sprocket import SprocketDetector
 from calibration_service import CalibrationService
 import socket
 import os
+import re
 from collections import deque
 
 async def troubleshoot_sprocket_detection(camera, websocket, tc, detector,
@@ -995,11 +996,128 @@ async def advance_to_next_perforation(camera,
         await asyncio.sleep(0.01)
 
 
-SAVE_DIR = "/media/williatf/SG1TB/GrokCam/testframes"
-os.makedirs(SAVE_DIR, exist_ok=True)
+PROJECTS_BASE_DIR = "/media/williatf/SG1TB/GrokCam/projects"
+os.makedirs(PROJECTS_BASE_DIR, exist_ok=True)
+
+active_project_name = None
+active_project_safe_name = None
+active_project_path = None
+
+
+def sanitize_project_name(name):
+    cleaned = str(name or "").strip()
+    cleaned = re.sub(r"\s+", "_", cleaned)
+    cleaned = re.sub(r"[^A-Za-z0-9_-]", "", cleaned)
+    cleaned = cleaned.strip("_-")
+    if not cleaned:
+        raise ValueError("Project name must contain letters, numbers, spaces, dash, or underscore")
+    return cleaned
+
+
+def get_project_paths(project_safe_name):
+    project_path = os.path.join(PROJECTS_BASE_DIR, project_safe_name)
+    frames_path = os.path.join(project_path, "frames")
+    debug_path = os.path.join(project_path, "debug")
+    metadata_path = os.path.join(project_path, "metadata.json")
+    return project_path, frames_path, debug_path, metadata_path
+
+
+def set_active_project(project_name, project_safe_name, project_path):
+    global active_project_name, active_project_safe_name, active_project_path
+    active_project_name = project_name
+    active_project_safe_name = project_safe_name
+    active_project_path = project_path
+
+
+def create_or_select_project(project_name):
+    safe_name = sanitize_project_name(project_name)
+    project_path, frames_path, debug_path, metadata_path = get_project_paths(safe_name)
+    os.makedirs(frames_path, exist_ok=True)
+    os.makedirs(debug_path, exist_ok=True)
+
+    created_timestamp = time.strftime("%Y-%m-%dT%H:%M:%S")
+    if os.path.exists(metadata_path):
+        try:
+            with open(metadata_path, "r", encoding="utf-8") as handle:
+                existing_metadata = json.load(handle)
+            created_timestamp = existing_metadata.get("created_timestamp", created_timestamp)
+        except Exception:
+            pass
+
+    metadata = {
+        "project_name": str(project_name).strip(),
+        "safe_folder_name": safe_name,
+        "created_timestamp": created_timestamp,
+        "base_path": PROJECTS_BASE_DIR,
+        "project_path": project_path,
+    }
+
+    with open(metadata_path, "w", encoding="utf-8") as handle:
+        json.dump(metadata, handle, indent=2)
+        handle.write("\n")
+
+    set_active_project(metadata["project_name"], safe_name, project_path)
+    return {
+        "name": metadata["project_name"],
+        "safe_name": safe_name,
+        "path": project_path,
+        "frames_path": frames_path,
+        "debug_path": debug_path,
+        "metadata_path": metadata_path,
+    }
+
+
+def list_projects():
+    projects = []
+    for entry in sorted(os.listdir(PROJECTS_BASE_DIR)):
+        project_path = os.path.join(PROJECTS_BASE_DIR, entry)
+        if not os.path.isdir(project_path):
+            continue
+
+        metadata_path = os.path.join(project_path, "metadata.json")
+        project_name = entry
+        if os.path.exists(metadata_path):
+            try:
+                with open(metadata_path, "r", encoding="utf-8") as handle:
+                    metadata = json.load(handle)
+                project_name = metadata.get("project_name", project_name)
+            except Exception:
+                pass
+
+        projects.append({
+            "name": project_name,
+            "safe_name": entry,
+            "path": project_path,
+        })
+
+    return projects
+
+
+def get_next_project_frame_number(frames_path):
+    frame_pattern = re.compile(r"^frame_(\d+)\.png$")
+    max_frame_number = 0
+    if not os.path.exists(frames_path):
+        return 1
+
+    for entry in os.listdir(frames_path):
+        match = frame_pattern.match(entry)
+        if not match:
+            continue
+        max_frame_number = max(max_frame_number, int(match.group(1)))
+
+    return max_frame_number + 1
 
 async def run_capture(websocket, num_frames, stop_event, preview_width=800, debug_scale=1.0):
     print("[APP] Capture task starting")
+    if not active_project_path:
+        raise RuntimeError("No active project selected")
+
+    project_name = active_project_name
+    project_path = active_project_path
+    frames_path = os.path.join(project_path, "frames")
+    os.makedirs(frames_path, exist_ok=True)
+    next_frame_number = get_next_project_frame_number(frames_path)
+
     tc.light_on()
     apply_capture_camera_controls()
     camera.start()
@@ -1145,8 +1263,8 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
             # Flip vertically to correct camera orientation (matches legacy behavior)
             frame_cropped = cv2.flip(frame_cropped, 0)
 
-            timestamp = int(time.time() * 1000)
-            filename = os.path.join(SAVE_DIR, f"frame_{timestamp}.png")
+            frame_number = next_frame_number + frame
+            filename = os.path.join(frames_path, f"frame_{frame_number:06d}.png")
             save_ok = cv2.imwrite(filename, frame_cropped)  # PNG = lossless
             if not save_ok:
                 print(f"[APP] WARNING: Failed to save cropped frame to {filename}")
@@ -1290,6 +1408,51 @@ async def handle_client(websocket):
 
             event = data.get('event')
 
+            if event == 'create_project':
+                if capture_task and not capture_task.done():
+                    await websocket.send(json.dumps({
+                        'event': 'error',
+                        'message': 'Cannot create or switch project while capture is running'
+                    }))
+                    continue
+
+                try:
+                    project_info = create_or_select_project(data.get('name', ''))
+                    print(f"[APP] Active project set: {project_info['name']} ({project_info['path']})")
+                    await websocket.send(json.dumps({
+                        'event': 'project_created',
+                        'active_project_name': project_info['name'],
+                        'active_project_safe_name': project_info['safe_name'],
+                        'active_project_path': project_info['path'],
+                        'frames_path': project_info['frames_path'],
+                        'debug_path': project_info['debug_path'],
+                        'metadata_path': project_info['metadata_path'],
+                    }))
+                except Exception as exc:
+                    print(f"[APP] Create project failed: {exc}")
+                    await websocket.send(json.dumps({
+                        'event': 'error',
+                        'message': f'Create project failed: {exc}'
+                    }))
+                continue
+
+            elif event == 'list_projects':
+                try:
+                    await websocket.send(json.dumps({
+                        'event': 'projects_list',
+                        'projects': list_projects(),
+                        'active_project_name': active_project_name,
+                        'active_project_safe_name': active_project_safe_name,
+                        'active_project_path': active_project_path,
+                    }))
+                except Exception as exc:
+                    print(f"[APP] List projects failed: {exc}")
+                    await websocket.send(json.dumps({
+                        'event': 'error',
+                        'message': f'List projects failed: {exc}'
+                    }))
+                continue
+
             if event == 'start_capture':
                 if capture_task and not capture_task.done():
                     await websocket.send(json.dumps({
@@ -1301,6 +1464,12 @@ async def handle_client(websocket):
                     await websocket.send(json.dumps({
                         'event': 'error',
                         'message': 'Cannot start capture while focus is active'
+                    }))
+                    continue
+                if not active_project_path:
+                    await websocket.send(json.dumps({
+                        'event': 'error',
+                        'message': 'Cannot start capture without an active project'
                     }))
                     continue
                 num_frames = data.get('num_frames', 100)
