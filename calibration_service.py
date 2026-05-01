@@ -30,6 +30,14 @@ class CalibrationService:
         sprockets = self.detector.detect(frame, mode="profile") or []
         classified_sprockets = self.detector.classify_sprockets(sprockets, frame.shape)
         debug_frame = frame.copy()
+        roi_x1, roi_y1, roi_x2, roi_y2 = self.detector.roi_bounds(frame.shape)
+        cv2.rectangle(
+            debug_frame,
+            (roi_x1, roi_y1),
+            (roi_x2 - 1, roi_y2 - 1),
+            (0, 255, 255),
+            2,
+        )
 
         for item in classified_sprockets:
             cx, cy, width, height, area = item["sprocket"]

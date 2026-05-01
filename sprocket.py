@@ -45,15 +45,9 @@ class SprocketDetector:
 
     def detect(self, frame_bgr, debug_prefix=None, mode="profile"):
         """Detect plausible sprocket candidates in the configured side ROI."""
-        frame_h, frame_w = frame_bgr.shape[:2]
-        strip_w = max(1, int(frame_w * self.auto_roi))
-
-        if self.side == "left":
-            roi = frame_bgr[:, :strip_w]
-            roi_offset = (0, 0)
-        else:
-            roi = frame_bgr[:, -strip_w:]
-            roi_offset = (frame_w - strip_w, 0)
+        x1, y1, x2, y2 = self.roi_bounds(frame_bgr.shape)
+        roi = frame_bgr[y1:y2, x1:x2]
+        roi_offset = (x1, y1)
 
         if mode in ("profile", "contour"):
             sprockets = self._detect_contours_scored(roi, roi_offset, frame_bgr, debug_prefix)
@@ -63,6 +57,15 @@ class SprocketDetector:
             return sorted(sprockets, key=lambda sprocket: sprocket[1])
 
         return self._detect_profile(roi, roi_offset, frame_bgr, debug_prefix)
+
+    def roi_bounds(self, frame_shape):
+        frame_h, frame_w = frame_shape[:2]
+        strip_w = max(1, int(frame_w * self.auto_roi))
+
+        if self.side == "left":
+            return 0, 0, strip_w, frame_h
+
+        return frame_w - strip_w, 0, frame_w, frame_h
 
     def classify_sprockets(self, sprockets, frame_shape, edge_margin_px=None):
         frame_h = frame_shape[0]
@@ -428,6 +431,13 @@ class SprocketDetector:
         if debug_prefix is not None:
             dbg = cv.cvtColor(gray, cv.COLOR_GRAY2BGR)
             dbg[:, mid_x] = (0, 0, 255)
+            cv.rectangle(
+                dbg,
+                (0, 0),
+                (roi_w - 1, roi_h - 1),
+                (0, 255, 255),
+                2,
+            )
             for cx, cy, w, h, _ in sprockets:
                 local_cx = cx - roi_offset[0]
                 local_cy = cy - roi_offset[1]

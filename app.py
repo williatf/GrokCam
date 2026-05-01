@@ -55,6 +55,8 @@ async def troubleshoot_sprocket_detection(camera, websocket, tc, detector,
 
             # --- draw debug overlay ---
             dbg = frame.copy()
+            roi_x1, roi_y1, roi_x2, roi_y2 = detector.roi_bounds(frame.shape)
+            cv2.rectangle(dbg, (roi_x1, roi_y1), (roi_x2 - 1, roi_y2 - 1), (0, 255, 255), 2)
             for (cx, cy, w, h, area) in sprockets:
                 x1, y1 = int(cx - w / 2), int(cy - h / 2)
                 x2, y2 = int(cx + w / 2), int(cy + h / 2)
@@ -107,6 +109,8 @@ def draw_sprockets_debug(frame, sprockets):
     Always returns a valid flipped debug frame.
     """
     debug_frame = frame.copy()
+    roi_x1, roi_y1, roi_x2, roi_y2 = detector.roi_bounds(frame.shape)
+    cv2.rectangle(debug_frame, (roi_x1, roi_y1), (roi_x2 - 1, roi_y2 - 1), (0, 255, 255), 2)
 
     # draw sprocket boxes if any
     if sprockets:
