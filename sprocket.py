@@ -310,6 +310,13 @@ class SprocketDetector:
 
         if debug_prefix is not None:
             dbg = cv.cvtColor(gray, cv.COLOR_GRAY2BGR)
+            cv.rectangle(
+                dbg,
+                (0, 0),
+                (roi_w - 1, roi_h - 1),
+                (0, 255, 255),
+                2,
+            )
             edge_margin = self._edge_margin_pixels(roi_h)
             cv.line(dbg, (0, edge_margin), (roi_w - 1, edge_margin), (80, 80, 255), 1)
             cv.line(dbg, (0, roi_h - edge_margin), (roi_w - 1, roi_h - edge_margin), (80, 80, 255), 1)
