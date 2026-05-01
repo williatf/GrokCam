@@ -21,7 +21,7 @@ class tcControl:
     gpio4_pin = pin_base + 14
     gpio5_pin = pin_base + 15
 
-    take_up_steps = take_up_counter = 550
+    take_up_steps = take_up_counter = 550 * 20
     tension_steps = 50
     step_counter = 0
     advance_settle_delay = 0.01

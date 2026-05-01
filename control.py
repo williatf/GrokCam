@@ -34,7 +34,7 @@ class tcControl:
         wiringpi.digitalWrite(self.STEPPER_PINS2[1], 1) #direction forward
 
         self.PUSHER_RATIO = 0.98 # push ~2% less than pull
-        self.TAKEUP_INTERVAL = 550
+        self.TAKEUP_INTERVAL = 550 * 20
         self.ADVANCE_SETTLE_DELAY = 0.01
         self.POST_TAKEUP_SETTLE_DELAY = 0.01
 
