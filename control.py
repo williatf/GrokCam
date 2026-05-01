@@ -23,10 +23,13 @@ class tcControl:
         wiringpi.pinMode(110, 1)
         self.STEPPER_PINS = [101, 102, 100]  # step, dir, enable
         self.STEPPER_PINS2 = [104, 103, 105]
-        self.TAKEUP_PINS = [106, 107]
+        self.REEL_PINS = [106, 107]
+        self.FEED_REEL_PIN = self.REEL_PINS[0]
+        self.TAKEUP_REEL_PIN = self.REEL_PINS[1]
         self.LED_PIN = 108
         self.SHUTTER_PINS = [109, 110]
-        self.steps_taken = 0
+        self.feed_steps_taken = 0
+        self.takeup_steps_taken = 0
         wiringpi.digitalWrite(self.LED_PIN, 0)
         wiringpi.digitalWrite(self.STEPPER_PINS[2], 0) #enable
         wiringpi.digitalWrite(self.STEPPER_PINS2[2], 0) #enable
@@ -34,7 +37,10 @@ class tcControl:
         wiringpi.digitalWrite(self.STEPPER_PINS2[1], 1) #direction forward
 
         self.PUSHER_RATIO = 0.98 # push ~2% less than pull
-        self.TAKEUP_INTERVAL = 550 * 20
+        self.FEED_INTERVAL = 5000
+        self.TAKEUP_INTERVAL = 5000
+        self.FEED_PULSE_DURATION = 0.1
+        self.TAKEUP_PULSE_DURATION = 0.2
         self.ADVANCE_SETTLE_DELAY = 0.01
         self.POST_TAKEUP_SETTLE_DELAY = 0.01
 
@@ -48,7 +54,6 @@ class tcControl:
         # Puller is master, always moves
         # Pusher moves according to PUSHER_RATIO
         pusher_counter = 0.0
-        takeup_pulses = 0
 
         for _ in range(steps):
             # Decide if pusher should move this step
@@ -68,20 +73,13 @@ class tcControl:
             if pusher_step:
                 wiringpi.digitalWrite(self.STEPPER_PINS[0], 0)
 
-            #time.sleep(0.001)
-
-            self.steps_taken += 1
-            if self.steps_taken >= self.TAKEUP_INTERVAL:
-                takeup_pulses += 1
-                self.steps_taken -= self.TAKEUP_INTERVAL
-
-        self._run_deferred_takeup(steps, takeup_pulses)
+        feed_pulses, takeup_pulses = self._schedule_reel_pulses(steps)
+        self._run_deferred_reel_pulses(steps, feed_pulses, takeup_pulses)
 
     def steps_back(self, steps=1):
         wiringpi.digitalWrite(self.STEPPER_PINS[1], 0) #direction backwards
         wiringpi.digitalWrite(self.STEPPER_PINS2[1], 0)
         pusher_counter = 0.0
-        takeup_pulses = 0
 
         for _ in range(steps):
             pusher_counter += self.PUSHER_RATIO
@@ -98,36 +96,48 @@ class tcControl:
             if pusher_step:
                 wiringpi.digitalWrite(self.STEPPER_PINS[0], 0)
 
-            self.steps_taken += 1
-            if self.steps_taken >= self.TAKEUP_INTERVAL:
-                takeup_pulses += 1
-                self.steps_taken -= self.TAKEUP_INTERVAL
-
         wiringpi.digitalWrite(self.STEPPER_PINS[1], 1) #direction back to foward
         wiringpi.digitalWrite(self.STEPPER_PINS2[1], 1)
-        self._run_deferred_takeup(steps, takeup_pulses)
+        feed_pulses, takeup_pulses = self._schedule_reel_pulses(steps)
+        self._run_deferred_reel_pulses(steps, feed_pulses, takeup_pulses)
 
-    def _run_deferred_takeup(self, advance_steps, takeup_pulses):
+    def _schedule_reel_pulses(self, advance_steps):
+        self.feed_steps_taken += advance_steps
+        feed_pulses = self.feed_steps_taken // self.FEED_INTERVAL
+        self.feed_steps_taken = self.feed_steps_taken % self.FEED_INTERVAL
+
+        self.takeup_steps_taken += advance_steps
+        takeup_pulses = self.takeup_steps_taken // self.TAKEUP_INTERVAL
+        self.takeup_steps_taken = self.takeup_steps_taken % self.TAKEUP_INTERVAL
+
+        return int(feed_pulses), int(takeup_pulses)
+
+    def _run_deferred_reel_pulses(self, advance_steps, feed_pulses, takeup_pulses):
         print(f"[APP] Advance complete: steps={advance_steps}")
         time.sleep(self.ADVANCE_SETTLE_DELAY)
-        if takeup_pulses <= 0:
+        if feed_pulses <= 0 and takeup_pulses <= 0:
             return
 
-        deferred_steps = takeup_pulses * self.TAKEUP_INTERVAL
-        print(f"[APP] Running deferred take-up: steps={deferred_steps}")
-        for _ in range(takeup_pulses):
-            self.takeup_pulse()
-        print("[APP] Deferred take-up complete")
+        if feed_pulses > 0:
+            print(f"[APP] Running feed reel pulses: count={feed_pulses}, steps={feed_pulses * self.FEED_INTERVAL}")
+            for _ in range(feed_pulses):
+                self.pulse_reel(self.FEED_REEL_PIN, self.FEED_PULSE_DURATION)
+
+        if takeup_pulses > 0:
+            print(f"[APP] Running take-up reel pulses: count={takeup_pulses}, steps={takeup_pulses * self.TAKEUP_INTERVAL}")
+            for _ in range(takeup_pulses):
+                self.pulse_reel(self.TAKEUP_REEL_PIN, self.TAKEUP_PULSE_DURATION)
+
+        print("[APP] Deferred reel pulses complete")
         time.sleep(self.POST_TAKEUP_SETTLE_DELAY)
 
-    def takeup_pulse(self):
-        for pin in self.TAKEUP_PINS:
-            wiringpi.digitalWrite(pin, 1)
-            time.sleep(0.1)
-            wiringpi.digitalWrite(pin, 0)
+    def pulse_reel(self, pin, duration):
+        wiringpi.digitalWrite(pin, 1)
+        time.sleep(duration)
+        wiringpi.digitalWrite(pin, 0)
 
     def rewind(self):
-        pin = self.TAKEUP_PINS[1]
+        pin = self.TAKEUP_REEL_PIN
         wiringpi.digitalWrite(pin, 1)
         time.sleep(1)
         wiringpi.digitalWrite(pin, 0)

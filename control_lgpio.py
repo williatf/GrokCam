@@ -21,7 +21,12 @@ class tcControl:
     gpio4_pin = pin_base + 14
     gpio5_pin = pin_base + 15
 
-    take_up_steps = take_up_counter = 550 * 20
+    feed_interval = 5000
+    take_up_steps = 5000
+    feed_counter = 0
+    take_up_counter = 0
+    feed_pulse_delay = 0.1
+    takeup_pulse_delay = 0.2
     tension_steps = 50
     step_counter = 0
     advance_settle_delay = 0.01
@@ -58,7 +63,6 @@ class tcControl:
 
     def change_direction(self, d=True):
         self.direction = d
-        self.take_up_counter = self.take_up_steps
         self.step_counter = self.tension_steps
         self.m1.set_direction(d)
         self.m2.set_direction(d)
@@ -69,20 +73,16 @@ class tcControl:
         original_steps = steps
         m1step = self.m1.step
         m2step = self.m2.step
-        takeup_pulses = 0
         while steps > 1:
             steps -= 1
-            self.take_up_counter -= 1
-            if self.take_up_counter == 1:
-                takeup_pulses += 1
-                self.take_up_counter = self.take_up_steps
             if self.step_counter > 0:
                 m1step()
                 self.step_counter -= 1
             else:
                 self.step_counter = self.tension_steps
             m2step()
-        self._run_deferred_takeup(self.reel2, takeup_pulses, original_steps)
+        feed_pulses, takeup_pulses = self._schedule_reel_pulses(original_steps)
+        self._run_deferred_reel_pulses(feed_pulses, takeup_pulses, original_steps)
 
     def steps_back(self, steps=1):
         if self.direction:
@@ -90,31 +90,45 @@ class tcControl:
         original_steps = steps
         m1step = self.m1.step
         m2step = self.m2.step
-        takeup_pulses = 0
         while steps > 1:
             steps -= 1
-            self.take_up_counter -= 1
-            if self.take_up_counter == 0:
-                takeup_pulses += 1
-                self.take_up_counter = self.take_up_steps
             if self.step_counter > 0:
                 m2step()
                 self.step_counter -= 1
             else:
                 self.step_counter = self.tension_steps
             m1step()
-        self._run_deferred_takeup(self.reel1, takeup_pulses, original_steps)
+        feed_pulses, takeup_pulses = self._schedule_reel_pulses(original_steps)
+        self._run_deferred_reel_pulses(feed_pulses, takeup_pulses, original_steps)
 
-    def _run_deferred_takeup(self, reel, takeup_pulses, advance_steps):
+    def _schedule_reel_pulses(self, advance_steps):
+        self.feed_counter += advance_steps
+        feed_pulses = self.feed_counter // self.feed_interval
+        self.feed_counter = self.feed_counter % self.feed_interval
+
+        self.take_up_counter += advance_steps
+        takeup_pulses = self.take_up_counter // self.take_up_steps
+        self.take_up_counter = self.take_up_counter % self.take_up_steps
+
+        return int(feed_pulses), int(takeup_pulses)
+
+    def _run_deferred_reel_pulses(self, feed_pulses, takeup_pulses, advance_steps):
         print(f"[APP] Advance complete: steps={advance_steps}")
         time.sleep(self.advance_settle_delay)
-        if takeup_pulses <= 0:
+        if feed_pulses <= 0 and takeup_pulses <= 0:
             return
 
-        print(f"[APP] Running deferred take-up: steps={takeup_pulses * self.take_up_steps}")
-        for _ in range(takeup_pulses):
-            reel.pulse()
-        print("[APP] Deferred take-up complete")
+        if feed_pulses > 0:
+            print(f"[APP] Running feed reel pulses: count={feed_pulses}, steps={feed_pulses * self.feed_interval}")
+            for _ in range(feed_pulses):
+                self.reel1.pulse(self.feed_pulse_delay)
+
+        if takeup_pulses > 0:
+            print(f"[APP] Running take-up reel pulses: count={takeup_pulses}, steps={takeup_pulses * self.take_up_steps}")
+            for _ in range(takeup_pulses):
+                self.reel2.pulse(self.takeup_pulse_delay)
+
+        print("[APP] Deferred reel pulses complete")
         time.sleep(self.post_takeup_settle_delay)
 
     def tension_film(self, steps=200):
@@ -192,8 +206,6 @@ class ledControl:
         lgpio.spi_write(self.h_spi, bytes([0x40 | (self.addr << 1), tcControl.MCP23S17_GPIOA, 0]))
 
 class reelMotor:
-    pulse_delay = 0.035
-
     def __init__(self, pin, h_spi, addr):
         self.pin = pin
         self.h_spi = h_spi
@@ -206,9 +218,9 @@ class reelMotor:
     def off(self):
         lgpio.spi_write(self.h_spi, bytes([0x40 | (self.addr << 1), tcControl.MCP23S17_GPIOA, 0]))
 
-    def pulse(self):
+    def pulse(self, duration):
         self.on()
-        time.sleep(self.pulse_delay)
+        time.sleep(duration)
         self.off()
 
 class shutterRelease:
