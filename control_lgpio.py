@@ -22,7 +22,7 @@ class tcControl:
     gpio5_pin = pin_base + 15
 
     feed_interval = 5000
-    take_up_steps = 5000
+    take_up_steps = 2500
     feed_counter = 0
     take_up_counter = 0
     feed_pulse_delay = 0.1

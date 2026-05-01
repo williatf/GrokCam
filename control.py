@@ -38,7 +38,7 @@ class tcControl:
 
         self.PUSHER_RATIO = 0.98 # push ~2% less than pull
         self.FEED_INTERVAL = 5000
-        self.TAKEUP_INTERVAL = 5000
+        self.TAKEUP_INTERVAL = 2500
         self.FEED_PULSE_DURATION = 0.1
         self.TAKEUP_PULSE_DURATION = 0.2
         self.ADVANCE_SETTLE_DELAY = 0.01
