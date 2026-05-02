@@ -61,6 +61,18 @@ class tcControl:
     def light_off(self):
         self.led.off()
 
+    def feed_reel_on(self):
+        self.reel1.on()
+
+    def feed_reel_off(self):
+        self.reel1.off()
+
+    def takeup_reel_on(self):
+        self.reel2.on()
+
+    def takeup_reel_off(self):
+        self.reel2.off()
+
     def change_direction(self, d=True):
         self.direction = d
         self.step_counter = self.tension_steps
@@ -143,8 +155,8 @@ class tcControl:
 
     def clean_up(self):
         self.led.off()
-        self.reel1.off()
-        self.reel2.off()
+        self.feed_reel_off()
+        self.takeup_reel_off()
         self.m1.off()
         self.m2.off()
         lgpio.spi_close(self.h_spi)

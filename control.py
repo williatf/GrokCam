@@ -50,6 +50,21 @@ class tcControl:
     def light_off(self):
         wiringpi.digitalWrite(self.LED_PIN, 0)
 
+    def set_reel_state(self, pin, enabled):
+        wiringpi.digitalWrite(pin, 1 if enabled else 0)
+
+    def feed_reel_on(self):
+        self.set_reel_state(self.FEED_REEL_PIN, True)
+
+    def feed_reel_off(self):
+        self.set_reel_state(self.FEED_REEL_PIN, False)
+
+    def takeup_reel_on(self):
+        self.set_reel_state(self.TAKEUP_REEL_PIN, True)
+
+    def takeup_reel_off(self):
+        self.set_reel_state(self.TAKEUP_REEL_PIN, False)
+
     def steps_forward(self, steps=1):
         # Puller is master, always moves
         # Pusher moves according to PUSHER_RATIO
@@ -132,16 +147,18 @@ class tcControl:
         time.sleep(self.POST_TAKEUP_SETTLE_DELAY)
 
     def pulse_reel(self, pin, duration):
-        wiringpi.digitalWrite(pin, 1)
+        self.set_reel_state(pin, True)
         time.sleep(duration)
-        wiringpi.digitalWrite(pin, 0)
+        self.set_reel_state(pin, False)
 
     def rewind(self):
         pin = self.TAKEUP_REEL_PIN
-        wiringpi.digitalWrite(pin, 1)
+        self.set_reel_state(pin, True)
         time.sleep(1)
-        wiringpi.digitalWrite(pin, 0)
+        self.set_reel_state(pin, False)
 
     def clean_up(self):
         self.light_off()
+        self.feed_reel_off()
+        self.takeup_reel_off()
         wiringpi.digitalWrite(self.STEPPER_PINS[2], 0)
