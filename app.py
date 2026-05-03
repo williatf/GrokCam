@@ -103,14 +103,25 @@ async def troubleshoot_sprocket_detection(camera, websocket, tc, detector,
     camera.stop()
     print("[TROUBLE] Troubleshooting mode exited cleanly")
 
-def draw_sprockets_debug(frame, sprockets):
+def draw_sprockets_debug(frame, sprockets, registration_y=None):
     """
     Draw bounding boxes, centers, and labels for detected sprockets.
     Always returns a valid flipped debug frame.
     """
     debug_frame = frame.copy()
     roi_x1, roi_y1, roi_x2, roi_y2 = detector.roi_bounds(frame.shape)
-    cv2.rectangle(debug_frame, (roi_x1, roi_y1), (roi_x2 - 1, roi_y2 - 1), (0, 255, 255), 2)
+    roi_left = roi_x1 if roi_x1 > 0 else 1
+    roi_right = roi_x2 - 1 if roi_x2 < frame.shape[1] else frame.shape[1] - 2
+    cv2.line(debug_frame, (roi_left, roi_y1), (roi_left, roi_y2 - 1), (0, 255, 255), 2)
+    cv2.line(debug_frame, (roi_right, roi_y1), (roi_right, roi_y2 - 1), (0, 255, 255), 2)
+    cv2.rectangle(debug_frame, (max(0, roi_x1), roi_y1), (max(0, roi_x2 - 1), roi_y2 - 1), (0, 255, 255), 1)
+
+    if registration_y is not None:
+        try:
+            crop_x1, crop_y1, crop_x2, crop_y2 = get_relative_crop_rect(frame, registration_y)
+            cv2.rectangle(debug_frame, (crop_x1, crop_y1), (crop_x2, crop_y2), (255, 255, 0), 2)
+        except Exception:
+            pass
 
     # draw sprocket boxes if any
     if sprockets:
@@ -1162,13 +1173,13 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
             )
 
             sprockets = detector.detect(frame_bgr, mode="profile")
-            debug_frame = draw_sprockets_debug(frame_bgr, sprockets if sprockets else [])
             classified_sprockets = detector.classify_sprockets(sprockets if sprockets else [], frame_bgr.shape)
             full_count = sum(1 for item in classified_sprockets if item.get('status') == 'full')
             partial_count = sum(1 for item in classified_sprockets if item.get('status') == 'partial')
             capture_registration = get_capture_registration(frame_bgr, sprockets if sprockets else [])
             registration_y = capture_registration.get('registration_y')
             registration_mode = capture_registration.get('mode', 'none')
+            debug_frame = draw_sprockets_debug(frame_bgr, sprockets if sprockets else [], registration_y=registration_y)
 
             if registration_mode == 'pair':
                 missing_pair_count = 0
@@ -1947,7 +1958,8 @@ async def handle_client(websocket):
 
                 # Detect sprockets + crop
                 sprockets = detector.detect(frame_bgr, mode="profile")
-                debug_frame = draw_sprockets_debug(frame_bgr, sprockets if sprockets else [])
+                registration_y = get_registration_y(frame_bgr, sprockets if sprockets else [])
+                debug_frame = draw_sprockets_debug(frame_bgr, sprockets if sprockets else [], registration_y=registration_y)
                 anchor = sprockets[0] if sprockets else None
                 frame_cropped = crop_film_frame(frame_bgr, anchor, SPROCKET_PITCH_PX)
 
