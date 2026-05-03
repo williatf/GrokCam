@@ -26,6 +26,11 @@ class SprocketDetector:
         self.adaptive_C = adaptive_C
         self.method = method
         self.inv = inv
+        self.roi_padding_frac = 0.10
+        self.roi_min_width_frac = 0.08
+        self.roi_miss_reset = 3
+        self.dynamic_roi_bounds = None
+        self.dynamic_roi_misses = 0
 
         # Calibration hints
         self.expected_width = None
@@ -54,11 +59,27 @@ class SprocketDetector:
             if len(sprockets) < 2:
                 profile_sprockets = self._detect_profile(roi, roi_offset, frame_bgr, None)
                 sprockets = self._merge_sprocket_lists(sprockets, profile_sprockets, frame_bgr.shape)
-            return sorted(sprockets, key=lambda sprocket: sprocket[1])
+            sprockets = sorted(sprockets, key=lambda sprocket: sprocket[1])
+            self._update_dynamic_roi(frame_bgr.shape, sprockets)
+            return sprockets
 
-        return self._detect_profile(roi, roi_offset, frame_bgr, debug_prefix)
+        sprockets = self._detect_profile(roi, roi_offset, frame_bgr, debug_prefix)
+        self._update_dynamic_roi(frame_bgr.shape, sprockets)
+        return sprockets
 
     def roi_bounds(self, frame_shape):
+        frame_h, frame_w = frame_shape[:2]
+        if self.dynamic_roi_bounds is not None:
+            x1, y1, x2, y2 = self.dynamic_roi_bounds
+            x1 = max(0, min(frame_w - 1, int(x1)))
+            x2 = max(x1 + 1, min(frame_w, int(x2)))
+            y1 = max(0, min(frame_h - 1, int(y1)))
+            y2 = max(y1 + 1, min(frame_h, int(y2)))
+            return x1, y1, x2, y2
+
+        return self.default_roi_bounds(frame_shape)
+
+    def default_roi_bounds(self, frame_shape):
         frame_h, frame_w = frame_shape[:2]
         strip_w = max(1, int(frame_w * self.auto_roi))
 
@@ -66,6 +87,40 @@ class SprocketDetector:
             return 0, 0, strip_w, frame_h
 
         return frame_w - strip_w, 0, frame_w, frame_h
+
+    def _update_dynamic_roi(self, frame_shape, sprockets):
+        frame_h, frame_w = frame_shape[:2]
+        if not sprockets:
+            self.dynamic_roi_misses += 1
+            if self.dynamic_roi_misses >= self.roi_miss_reset:
+                self.dynamic_roi_bounds = None
+            return
+
+        self.dynamic_roi_misses = 0
+
+        widths = [max(1.0, float(sprocket[2])) for sprocket in sprockets]
+        min_x = min(float(sprocket[0]) - (float(sprocket[2]) / 2.0) for sprocket in sprockets)
+        max_x = max(float(sprocket[0]) + (float(sprocket[2]) / 2.0) for sprocket in sprockets)
+        max_width = max(widths) if widths else 1.0
+        padding = max(4.0, max_width * float(self.roi_padding_frac))
+        min_roi_width = max(8, int(round(frame_w * float(self.roi_min_width_frac))))
+
+        x1 = int(round(max(0.0, min_x - padding)))
+        x2 = int(round(min(float(frame_w), max_x + padding)))
+        if x2 - x1 < min_roi_width:
+            center_x = (x1 + x2) / 2.0
+            half_width = min_roi_width / 2.0
+            x1 = int(round(max(0.0, center_x - half_width)))
+            x2 = int(round(min(float(frame_w), center_x + half_width)))
+
+        if self.side == "left":
+            x1 = 0
+        else:
+            x2 = frame_w
+
+        x1 = max(0, min(frame_w - 1, x1))
+        x2 = max(x1 + 1, min(frame_w, x2))
+        self.dynamic_roi_bounds = (x1, 0, x2, frame_h)
 
     def classify_sprockets(self, sprockets, frame_shape, edge_margin_px=None):
         frame_h = frame_shape[0]
