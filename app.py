@@ -584,6 +584,7 @@ CAMERA_GAIN_MAX = 16.0
 current_camera_settings = {
     'ExposureTime': int(EXPOSURE_TIME),
     'AnalogueGain': float(GAIN),
+    'ColourGains': None,
     'AeEnable': False,
     'AwbEnable': False,
     'source': 'default',
@@ -635,7 +636,7 @@ def clamp_camera_settings(exposure_time=None, analogue_gain=None):
 
 def camera_settings_response_payload(settings_state=None):
     state = settings_state or current_camera_settings
-    return {
+    payload = {
         'event': 'camera_settings',
         'type': 'camera_settings',
         'exposure_time': int(state.get('ExposureTime', EXPOSURE_TIME)),
@@ -645,13 +646,39 @@ def camera_settings_response_payload(settings_state=None):
         'saved': bool(state.get('saved', False)),
         'source': state.get('source', 'default'),
     }
+    colour_gains = state.get('ColourGains')
+    if colour_gains is not None:
+        payload['colour_gains'] = [float(colour_gains[0]), float(colour_gains[1])]
+    return payload
 
 
-def set_current_camera_settings_state(exposure_time, analogue_gain, source='manual', saved=False, project_path=None, timestamp=None):
+def camera_awb_response_payload(settings_state=None):
+    state = settings_state or current_camera_settings
+    colour_gains = state.get('ColourGains')
+    return {
+        'event': 'camera_awb',
+        'type': 'camera_awb',
+        'colour_gains': [float(colour_gains[0]), float(colour_gains[1])] if colour_gains is not None else None,
+        'awb_enable': bool(state.get('AwbEnable', False)),
+        'ae_enable': bool(state.get('AeEnable', False)),
+        'source': state.get('source', 'default'),
+    }
+
+
+def normalize_colour_gains(colour_gains):
+    if colour_gains is None:
+        return None
+    if not isinstance(colour_gains, (list, tuple)) or len(colour_gains) != 2:
+        raise ValueError('ColourGains must be a two-element sequence')
+    return (float(colour_gains[0]), float(colour_gains[1]))
+
+
+def set_current_camera_settings_state(exposure_time, analogue_gain, source='manual', saved=False, project_path=None, timestamp=None, colour_gains=None):
     global current_camera_settings
     current_camera_settings = {
         'ExposureTime': int(exposure_time),
         'AnalogueGain': float(analogue_gain),
+        'ColourGains': normalize_colour_gains(colour_gains),
         'AeEnable': False,
         'AwbEnable': False,
         'source': source,
@@ -662,19 +689,24 @@ def set_current_camera_settings_state(exposure_time, analogue_gain, source='manu
     return current_camera_settings.copy()
 
 
-def apply_manual_camera_settings(exposure_time=None, analogue_gain=None, source='manual', saved=False, project_path=None, timestamp=None):
+def apply_manual_camera_settings(exposure_time=None, analogue_gain=None, source='manual', saved=False, project_path=None, timestamp=None, colour_gains=None):
     clamped = clamp_camera_settings(exposure_time=exposure_time, analogue_gain=analogue_gain)
     if clamped['exposure_clamped'] or clamped['gain_clamped']:
         print(
             f"[APP] Camera settings clamped: exposure={clamped['ExposureTime']} gain={clamped['AnalogueGain']:.3f}"
         )
 
-    camera.set_controls({
+    controls = {
         'ExposureTime': int(clamped['ExposureTime']),
         'AnalogueGain': float(clamped['AnalogueGain']),
         'AeEnable': False,
         'AwbEnable': False,
-    })
+    }
+    normalized_colour_gains = normalize_colour_gains(colour_gains)
+    if normalized_colour_gains is not None:
+        controls['ColourGains'] = normalized_colour_gains
+
+    camera.set_controls(controls)
     applied = set_current_camera_settings_state(
         clamped['ExposureTime'],
         clamped['AnalogueGain'],
@@ -682,6 +714,7 @@ def apply_manual_camera_settings(exposure_time=None, analogue_gain=None, source=
         saved=saved,
         project_path=project_path,
         timestamp=timestamp,
+        colour_gains=normalized_colour_gains,
     )
     print(
         f"[APP] Camera settings applied: exposure={applied['ExposureTime']} "
@@ -702,6 +735,7 @@ def load_project_camera_settings(project_path=None, apply=False):
         exposure_time=payload.get('ExposureTime', EXPOSURE_TIME),
         analogue_gain=payload.get('AnalogueGain', GAIN),
     )
+    colour_gains = payload.get('ColourGains')
     print(f"[APP] Loaded camera settings from {settings_path}")
     if apply:
         return apply_manual_camera_settings(
@@ -711,6 +745,7 @@ def load_project_camera_settings(project_path=None, apply=False):
             saved=True,
             project_path=project_path or active_project_path,
             timestamp=payload.get('timestamp'),
+            colour_gains=colour_gains,
         )
 
     return set_current_camera_settings_state(
@@ -720,6 +755,7 @@ def load_project_camera_settings(project_path=None, apply=False):
         saved=True,
         project_path=project_path or active_project_path,
         timestamp=payload.get('timestamp'),
+        colour_gains=colour_gains,
     )
 
 
@@ -747,6 +783,7 @@ def initialize_project_camera_settings(project_path=None, apply=False):
         source='default',
         saved=False,
         project_path=target_project_path,
+        colour_gains=current_camera_settings.get('ColourGains'),
     )
 
 
@@ -765,6 +802,7 @@ def apply_project_capture_camera_settings(project_path=None, prefer_saved=True):
             saved=current_camera_settings.get('saved', False),
             project_path=target_project_path,
             timestamp=current_camera_settings.get('timestamp'),
+            colour_gains=current_camera_settings.get('ColourGains'),
         )
 
     return apply_manual_camera_settings(
@@ -773,6 +811,7 @@ def apply_project_capture_camera_settings(project_path=None, prefer_saved=True):
         source='default',
         saved=False,
         project_path=target_project_path,
+        colour_gains=current_camera_settings.get('ColourGains'),
     )
 
 def apply_capture_camera_controls():
@@ -786,6 +825,109 @@ def apply_focus_camera_controls():
         "AeEnable": True,
         "AwbEnable": False,
     })
+
+
+def _metadata_value(metadata, *keys):
+    for key in keys:
+        if key in metadata and metadata[key] is not None:
+            return metadata[key]
+    return None
+
+
+async def converge_camera_metadata(settle_frames=12, settle_delay=0.08):
+    metadata = {}
+    for _ in range(max(1, int(settle_frames))):
+        await asyncio.sleep(float(settle_delay))
+        metadata = camera.capture_metadata() or {}
+    return metadata
+
+
+async def run_one_shot_auto_exposure(preview_active=False, settle_frames=12, settle_delay=0.08):
+    started_here = False
+    started_at = time.time()
+    try:
+        if not preview_active:
+            tc.light_on()
+            camera.start()
+            started_here = True
+            await asyncio.sleep(0.3)
+
+        print("[APP] Auto exposure start")
+        camera.set_controls({
+            'AeEnable': True,
+            'AwbEnable': False,
+        })
+        metadata = await converge_camera_metadata(settle_frames=settle_frames, settle_delay=settle_delay)
+
+        measured_exposure = _metadata_value(metadata, 'ExposureTime', 'SensorExposureTime')
+        measured_gain = _metadata_value(metadata, 'AnalogueGain')
+        if measured_exposure is None:
+            measured_exposure = current_camera_settings.get('ExposureTime', EXPOSURE_TIME)
+        if measured_gain is None:
+            measured_gain = current_camera_settings.get('AnalogueGain', GAIN)
+
+        applied = apply_manual_camera_settings(
+            measured_exposure,
+            measured_gain,
+            source='auto_exposure',
+            saved=False,
+            project_path=active_project_path,
+            timestamp=datetime.now().isoformat(),
+            colour_gains=current_camera_settings.get('ColourGains'),
+        )
+        elapsed = time.time() - started_at
+        print(
+            f"[APP] Auto exposure locked: exposure={applied['ExposureTime']} "
+            f"gain={applied['AnalogueGain']:.3f} elapsed={elapsed:.2f}s"
+        )
+        return applied
+    finally:
+        if started_here:
+            tc.light_off()
+            camera.stop()
+
+
+async def run_one_shot_auto_awb(preview_active=False, settle_frames=12, settle_delay=0.08):
+    started_here = False
+    started_at = time.time()
+    try:
+        if not preview_active:
+            tc.light_on()
+            camera.start()
+            started_here = True
+            await asyncio.sleep(0.3)
+
+        print("[APP] Auto white balance start")
+        camera.set_controls({
+            'AeEnable': False,
+            'AwbEnable': True,
+        })
+        metadata = await converge_camera_metadata(settle_frames=settle_frames, settle_delay=settle_delay)
+
+        measured_colour_gains = _metadata_value(metadata, 'ColourGains', 'ColorGains')
+        if measured_colour_gains is None:
+            measured_colour_gains = current_camera_settings.get('ColourGains')
+        if measured_colour_gains is None:
+            raise RuntimeError('Unable to read converged ColourGains from camera metadata')
+
+        applied = apply_manual_camera_settings(
+            current_camera_settings.get('ExposureTime', EXPOSURE_TIME),
+            current_camera_settings.get('AnalogueGain', GAIN),
+            source='auto_awb',
+            saved=False,
+            project_path=active_project_path,
+            timestamp=datetime.now().isoformat(),
+            colour_gains=measured_colour_gains,
+        )
+        elapsed = time.time() - started_at
+        print(
+            f"[APP] Auto white balance locked: colour_gains={applied.get('ColourGains')} elapsed={elapsed:.2f}s"
+        )
+        return applied
+    finally:
+        if started_here:
+            tc.light_off()
+            camera.stop()
 
 
 async def tune_calibration_exposure(camera, detector, target=225, percentile=99.5, max_iters=8):
@@ -1405,6 +1547,11 @@ def save_project_camera_settings(project_path=None):
         'source': 'manual',
         'timestamp': datetime.now().isoformat(),
     }
+    if applied.get('ColourGains') is not None:
+        payload['ColourGains'] = [
+            float(applied['ColourGains'][0]),
+            float(applied['ColourGains'][1]),
+        ]
     with open(settings_path, 'w', encoding='utf-8') as handle:
         json.dump(payload, handle, indent=2)
         handle.write('\n')
@@ -1416,6 +1563,7 @@ def save_project_camera_settings(project_path=None):
         saved=True,
         project_path=target_project_path,
         timestamp=payload['timestamp'],
+        colour_gains=payload.get('ColourGains'),
     )
     print(f"[APP] Saved camera settings to {settings_path}")
     return settings_path
@@ -1933,6 +2081,52 @@ async def handle_client(websocket):
                     await websocket.send(json.dumps({
                         'event': 'error',
                         'message': f'Save camera settings failed: {exc}'
+                    }))
+                continue
+
+            elif event == 'auto_set_exposure':
+                if capture_task and not capture_task.done():
+                    await websocket.send(json.dumps({
+                        'event': 'error',
+                        'message': 'Cannot run auto exposure during capture'
+                    }))
+                    continue
+
+                preview_active = (
+                    (focus_task and not focus_task.done())
+                    or (camera_calibration_task and not camera_calibration_task.done())
+                )
+                try:
+                    applied = await run_one_shot_auto_exposure(preview_active=bool(preview_active))
+                    await websocket.send(json.dumps(camera_settings_response_payload(applied)))
+                except Exception as exc:
+                    print(f"[APP] Auto exposure failed: {exc}")
+                    await websocket.send(json.dumps({
+                        'event': 'error',
+                        'message': f'Auto exposure failed: {exc}'
+                    }))
+                continue
+
+            elif event == 'auto_set_awb':
+                if capture_task and not capture_task.done():
+                    await websocket.send(json.dumps({
+                        'event': 'error',
+                        'message': 'Cannot run auto white balance during capture'
+                    }))
+                    continue
+
+                preview_active = (
+                    (focus_task and not focus_task.done())
+                    or (camera_calibration_task and not camera_calibration_task.done())
+                )
+                try:
+                    applied = await run_one_shot_auto_awb(preview_active=bool(preview_active))
+                    await websocket.send(json.dumps(camera_awb_response_payload(applied)))
+                except Exception as exc:
+                    print(f"[APP] Auto white balance failed: {exc}")
+                    await websocket.send(json.dumps({
+                        'event': 'error',
+                        'message': f'Auto white balance failed: {exc}'
                     }))
                 continue
 
