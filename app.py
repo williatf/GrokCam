@@ -15,6 +15,7 @@ from calibration_service import CalibrationService
 import socket
 import os
 import re
+from datetime import datetime
 from collections import deque
 
 async def troubleshoot_sprocket_detection(camera, websocket, tc, detector,
@@ -575,6 +576,22 @@ CALIBRATION_RES = tuple(calib_res)
 EXPOSURE_TIME = exposure_time
 GAIN = gain
 
+CAMERA_EXPOSURE_MIN = 100
+CAMERA_EXPOSURE_MAX = 50000
+CAMERA_GAIN_MIN = 1.0
+CAMERA_GAIN_MAX = 16.0
+
+current_camera_settings = {
+    'ExposureTime': int(EXPOSURE_TIME),
+    'AnalogueGain': float(GAIN),
+    'AeEnable': False,
+    'AwbEnable': False,
+    'source': 'default',
+    'saved': False,
+    'project_path': None,
+    'timestamp': None,
+}
+
 # --- Initialize transport ---
 print("Starting WebSocket server")
 tc = tcControl()
@@ -589,14 +606,174 @@ config_main = camera.create_still_configuration(main={"size": CALIBRATION_RES})
 camera.configure(config_main)
 camera.options['quality'] = 90
 
+
+def get_camera_settings_path(project_path=None):
+    target_project_path = project_path or active_project_path
+    if not target_project_path:
+        return None
+    return os.path.join(target_project_path, 'camera_settings.json')
+
+
+def clamp_camera_settings(exposure_time=None, analogue_gain=None):
+    requested_exposure = EXPOSURE_TIME if exposure_time is None else int(round(float(exposure_time)))
+    requested_gain = GAIN if analogue_gain is None else float(analogue_gain)
+    clamped_exposure = max(CAMERA_EXPOSURE_MIN, min(CAMERA_EXPOSURE_MAX, requested_exposure))
+    clamped_gain = max(CAMERA_GAIN_MIN, min(CAMERA_GAIN_MAX, requested_gain))
+    return {
+        'ExposureTime': int(clamped_exposure),
+        'AnalogueGain': float(clamped_gain),
+        'AeEnable': False,
+        'AwbEnable': False,
+        'exposure_clamped': clamped_exposure != requested_exposure,
+        'gain_clamped': clamped_gain != requested_gain,
+    }
+
+
+def camera_settings_response_payload(settings_state=None):
+    state = settings_state or current_camera_settings
+    return {
+        'event': 'camera_settings',
+        'type': 'camera_settings',
+        'exposure_time': int(state.get('ExposureTime', EXPOSURE_TIME)),
+        'analogue_gain': float(state.get('AnalogueGain', GAIN)),
+        'ae_enable': bool(state.get('AeEnable', False)),
+        'awb_enable': bool(state.get('AwbEnable', False)),
+        'saved': bool(state.get('saved', False)),
+        'source': state.get('source', 'default'),
+    }
+
+
+def set_current_camera_settings_state(exposure_time, analogue_gain, source='manual', saved=False, project_path=None, timestamp=None):
+    global current_camera_settings
+    current_camera_settings = {
+        'ExposureTime': int(exposure_time),
+        'AnalogueGain': float(analogue_gain),
+        'AeEnable': False,
+        'AwbEnable': False,
+        'source': source,
+        'saved': bool(saved),
+        'project_path': project_path,
+        'timestamp': timestamp,
+    }
+    return current_camera_settings.copy()
+
+
+def apply_manual_camera_settings(exposure_time=None, analogue_gain=None, source='manual', saved=False, project_path=None, timestamp=None):
+    clamped = clamp_camera_settings(exposure_time=exposure_time, analogue_gain=analogue_gain)
+    if clamped['exposure_clamped'] or clamped['gain_clamped']:
+        print(
+            f"[APP] Camera settings clamped: exposure={clamped['ExposureTime']} gain={clamped['AnalogueGain']:.3f}"
+        )
+
+    camera.set_controls({
+        'ExposureTime': int(clamped['ExposureTime']),
+        'AnalogueGain': float(clamped['AnalogueGain']),
+        'AeEnable': False,
+        'AwbEnable': False,
+    })
+    applied = set_current_camera_settings_state(
+        clamped['ExposureTime'],
+        clamped['AnalogueGain'],
+        source=source,
+        saved=saved,
+        project_path=project_path,
+        timestamp=timestamp,
+    )
+    print(
+        f"[APP] Camera settings applied: exposure={applied['ExposureTime']} "
+        f"gain={applied['AnalogueGain']:.3f} source={source} saved={saved}"
+    )
+    return applied
+
+
+def load_project_camera_settings(project_path=None, apply=False):
+    settings_path = get_camera_settings_path(project_path)
+    if not settings_path or not os.path.exists(settings_path):
+        return None
+
+    with open(settings_path, 'r', encoding='utf-8') as handle:
+        payload = json.load(handle)
+
+    clamped = clamp_camera_settings(
+        exposure_time=payload.get('ExposureTime', EXPOSURE_TIME),
+        analogue_gain=payload.get('AnalogueGain', GAIN),
+    )
+    print(f"[APP] Loaded camera settings from {settings_path}")
+    if apply:
+        return apply_manual_camera_settings(
+            clamped['ExposureTime'],
+            clamped['AnalogueGain'],
+            source=payload.get('source', 'manual'),
+            saved=True,
+            project_path=project_path or active_project_path,
+            timestamp=payload.get('timestamp'),
+        )
+
+    return set_current_camera_settings_state(
+        clamped['ExposureTime'],
+        clamped['AnalogueGain'],
+        source=payload.get('source', 'manual'),
+        saved=True,
+        project_path=project_path or active_project_path,
+        timestamp=payload.get('timestamp'),
+    )
+
+
+def has_project_manual_camera_settings(project_path=None):
+    target_project_path = project_path or active_project_path
+    if not target_project_path:
+        return False
+    if get_camera_settings_path(target_project_path) and os.path.exists(get_camera_settings_path(target_project_path)):
+        return True
+    return (
+        current_camera_settings.get('project_path') == target_project_path
+        and current_camera_settings.get('source') == 'manual'
+    )
+
+
+def initialize_project_camera_settings(project_path=None, apply=False):
+    target_project_path = project_path or active_project_path
+    loaded = load_project_camera_settings(target_project_path, apply=apply)
+    if loaded is not None:
+        return loaded
+
+    return set_current_camera_settings_state(
+        EXPOSURE_TIME,
+        GAIN,
+        source='default',
+        saved=False,
+        project_path=target_project_path,
+    )
+
+
+def apply_project_capture_camera_settings(project_path=None, prefer_saved=True):
+    target_project_path = project_path or active_project_path
+    if prefer_saved:
+        loaded = load_project_camera_settings(target_project_path, apply=True)
+        if loaded is not None:
+            return loaded
+
+    if current_camera_settings.get('project_path') == target_project_path:
+        return apply_manual_camera_settings(
+            current_camera_settings.get('ExposureTime', EXPOSURE_TIME),
+            current_camera_settings.get('AnalogueGain', GAIN),
+            source=current_camera_settings.get('source', 'default'),
+            saved=current_camera_settings.get('saved', False),
+            project_path=target_project_path,
+            timestamp=current_camera_settings.get('timestamp'),
+        )
+
+    return apply_manual_camera_settings(
+        EXPOSURE_TIME,
+        GAIN,
+        source='default',
+        saved=False,
+        project_path=target_project_path,
+    )
+
 def apply_capture_camera_controls():
     print("[APP] Switching camera to capture controls")
-    camera.set_controls({
-        "ExposureTime": EXPOSURE_TIME,
-        "AnalogueGain": GAIN,
-        "AeEnable": False,
-        "AwbEnable": False,
-    })
+    return apply_project_capture_camera_settings(active_project_path, prefer_saved=True)
 
 
 def apply_focus_camera_controls():
@@ -674,6 +851,24 @@ async def tune_calibration_exposure(camera, detector, target=225, percentile=99.
         "clip_pct": last_clip_pct,
         "iterations": iterations,
     }
+
+
+async def prepare_calibration_camera_settings(detector):
+    if has_project_manual_camera_settings(active_project_path):
+        applied = apply_project_capture_camera_settings(active_project_path, prefer_saved=True)
+        return {
+            'exposure_time': int(applied['ExposureTime']),
+            'gain': float(applied['AnalogueGain']),
+            'roi_percentile': None,
+            'roi_max': None,
+            'clip_pct': None,
+            'iterations': 0,
+            'source': 'manual_project',
+        }
+
+    exposure_result = await tune_calibration_exposure(camera, detector)
+    exposure_result['source'] = 'auto_calibration'
+    return exposure_result
 
 
 async def seek_two_full_sprockets(camera, tc, detector, step_size=10, max_steps=500, settle_delay=0.05):
@@ -1128,6 +1323,7 @@ def create_or_select_project(project_name):
     set_active_project(metadata["project_name"], safe_name, project_path)
     latest_crop_preview_pair_midpoint = None
     calibrated_baseline_registration_y = None
+    initialize_project_camera_settings(project_path, apply=False)
     reset_registration_tracking("project_selected")
     return {
         "name": metadata["project_name"],
@@ -1188,6 +1384,43 @@ def append_registration_metadata(metadata_path, payload):
     except Exception as exc:
         print(f"[APP] Registration metadata write failed: {exc}")
 
+
+def get_active_camera_settings_state():
+    if active_project_path and current_camera_settings.get('project_path') != active_project_path:
+        initialize_project_camera_settings(active_project_path, apply=False)
+    return current_camera_settings.copy()
+
+
+def save_project_camera_settings(project_path=None):
+    target_project_path = project_path or active_project_path
+    if not target_project_path:
+        raise RuntimeError('No active project selected')
+
+    applied = get_active_camera_settings_state()
+    settings_path = get_camera_settings_path(target_project_path)
+    payload = {
+        'ExposureTime': int(applied.get('ExposureTime', EXPOSURE_TIME)),
+        'AnalogueGain': float(applied.get('AnalogueGain', GAIN)),
+        'AeEnable': False,
+        'AwbEnable': False,
+        'source': 'manual',
+        'timestamp': datetime.now().isoformat(),
+    }
+    with open(settings_path, 'w', encoding='utf-8') as handle:
+        json.dump(payload, handle, indent=2)
+        handle.write('\n')
+
+    set_current_camera_settings_state(
+        payload['ExposureTime'],
+        payload['AnalogueGain'],
+        source='manual',
+        saved=True,
+        project_path=target_project_path,
+        timestamp=payload['timestamp'],
+    )
+    print(f"[APP] Saved camera settings to {settings_path}")
+    return settings_path
+
 async def run_capture(websocket, num_frames, stop_event, preview_width=800, debug_scale=1.0):
     print("[APP] Capture task starting")
     if not active_project_path:
@@ -1206,7 +1439,7 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
     )
 
     tc.light_on()
-    apply_capture_camera_controls()
+    applied_camera_settings = apply_capture_camera_controls()
     camera.start()
     reset_registration_tracking("capture_start")
     print("[APP] LED on + camera, stabilizing...")
@@ -1410,6 +1643,10 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
                 'crop_y1': int(crop_meta.get('crop_y1', crop_y1)),
                 'crop_y2': int(crop_meta.get('crop_y2', crop_y2)),
                 'crop_clamped': bool(crop_meta.get('crop_clamped')),
+                'camera_exposure_time': int(applied_camera_settings.get('ExposureTime', EXPOSURE_TIME)),
+                'camera_analogue_gain': float(applied_camera_settings.get('AnalogueGain', GAIN)),
+                'camera_settings_saved': bool(applied_camera_settings.get('saved', False)),
+                'camera_settings_source': applied_camera_settings.get('source', 'default'),
                 'failure_count': int(tracked_registration.get('failure_count', 0)),
                 'saved_frame_path': filename,
             }
@@ -1454,12 +1691,22 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
         camera.stop()
         print("[APP] Capture task cleaned up")
 
-async def run_focus(websocket, stop_event, preview_width=800, fps=5):
-    print("[APP] Focus task starting")
+async def run_preview_stream(websocket, stop_event, preview_width=800, fps=5, mode='focus'):
+    print(f"[APP] {mode} preview task starting")
     tc.light_on()
     camera.start()
-    apply_focus_camera_controls()
-    print("[APP] LED on + camera for focus")
+    if mode == 'focus':
+        apply_focus_camera_controls()
+        started_event = 'focus_started'
+        frame_event = 'focus_frame'
+        stopped_event = 'focus_stopped'
+        print("[APP] LED on + camera for focus")
+    else:
+        apply_project_capture_camera_settings(active_project_path, prefer_saved=False)
+        started_event = 'camera_calibration_preview_started'
+        frame_event = 'camera_calibration_preview_frame'
+        stopped_event = 'camera_calibration_preview_stopped'
+        print("[APP] LED on + camera for camera calibration preview")
 
     frame_num = 0
     preview_width = max(1, int(preview_width))
@@ -1468,7 +1715,8 @@ async def run_focus(websocket, stop_event, preview_width=800, fps=5):
     try:
         await asyncio.sleep(1.0)
         await websocket.send(json.dumps({
-            'event': 'focus_started'
+            'event': started_event,
+            'type': started_event,
         }))
 
         while not stop_event.is_set():
@@ -1497,7 +1745,8 @@ async def run_focus(websocket, stop_event, preview_width=800, fps=5):
 
             jpg_bytes = encoded.tobytes()
             await websocket.send(json.dumps({
-                'event': 'focus_frame',
+                'event': frame_event,
+                'type': frame_event,
                 'frame': frame_num,
                 'size': len(jpg_bytes)
             }))
@@ -1508,13 +1757,22 @@ async def run_focus(websocket, stop_event, preview_width=800, fps=5):
         camera.stop()
         try:
             await websocket.send(json.dumps({
-                'event': 'focus_stopped'
+                'event': stopped_event,
+                'type': stopped_event,
             }))
         except (ConnectionClosedError, ConnectionClosedOK):
-            print("[APP] Focus stop notification skipped: client disconnected")
+            print(f"[APP] {mode} stop notification skipped: client disconnected")
         except Exception as exc:
-            print(f"[APP] Focus stop notification error: {exc}")
-        print("[APP] Focus task cleaned up")
+            print(f"[APP] {mode} stop notification error: {exc}")
+        print(f"[APP] {mode} preview task cleaned up")
+
+
+async def run_focus(websocket, stop_event, preview_width=800, fps=5):
+    return await run_preview_stream(websocket, stop_event, preview_width=preview_width, fps=fps, mode='focus')
+
+
+async def run_camera_calibration_preview(websocket, stop_event, preview_width=800, fps=5):
+    return await run_preview_stream(websocket, stop_event, preview_width=preview_width, fps=fps, mode='camera_calibration')
 
 async def handle_client(websocket):
     print("Client connected")
@@ -1522,6 +1780,8 @@ async def handle_client(websocket):
     capture_stop_event = None
     focus_task = None
     focus_stop_event = None
+    camera_calibration_task = None
+    camera_calibration_stop_event = None
     latest_proposed_calibration = None
     latest_can_save = False
     latest_save_block_reason = 'no_calibration_sweep_run'
@@ -1554,7 +1814,19 @@ async def handle_client(websocket):
                 focus_task = None
                 focus_stop_event = None
 
-            event = data.get('event')
+            if camera_calibration_task and camera_calibration_task.done():
+                try:
+                    camera_calibration_task.result()
+                except Exception as exc:
+                    print(f"[APP] Camera calibration preview task error: {exc}")
+                    await websocket.send(json.dumps({
+                        'event': 'error',
+                        'message': 'Camera calibration preview failed'
+                    }))
+                camera_calibration_task = None
+                camera_calibration_stop_event = None
+
+            event = data.get('event') or data.get('type')
 
             if event == 'create_project':
                 if capture_task and not capture_task.done():
@@ -1566,6 +1838,8 @@ async def handle_client(websocket):
 
                 try:
                     project_info = create_or_select_project(data.get('name', ''))
+                    if not (focus_task and not focus_task.done()) and not (camera_calibration_task and not camera_calibration_task.done()):
+                        apply_project_capture_camera_settings(project_info['path'], prefer_saved=True)
                     print(f"[APP] Active project set: {project_info['name']} ({project_info['path']})")
                     await websocket.send(json.dumps({
                         'event': 'project_created',
@@ -1601,6 +1875,117 @@ async def handle_client(websocket):
                     }))
                 continue
 
+            elif event == 'get_camera_settings':
+                state = get_active_camera_settings_state()
+                await websocket.send(json.dumps(camera_settings_response_payload(state)))
+                continue
+
+            elif event == 'set_camera_settings':
+                if capture_task and not capture_task.done():
+                    await websocket.send(json.dumps({
+                        'event': 'error',
+                        'message': 'Cannot change camera settings during capture'
+                    }))
+                    continue
+                if focus_task and not focus_task.done():
+                    await websocket.send(json.dumps({
+                        'event': 'error',
+                        'message': 'Cannot change manual camera settings while focus preview is active'
+                    }))
+                    continue
+
+                requested_exposure = data.get('exposure_time')
+                requested_gain = data.get('analogue_gain')
+                if requested_exposure is None or requested_gain is None:
+                    await websocket.send(json.dumps({
+                        'event': 'error',
+                        'message': 'Missing exposure_time or analogue_gain'
+                    }))
+                    continue
+
+                try:
+                    applied = apply_manual_camera_settings(
+                        requested_exposure,
+                        requested_gain,
+                        source='manual',
+                        saved=False,
+                        project_path=active_project_path,
+                    )
+                except (TypeError, ValueError) as exc:
+                    print(f"[APP] Invalid camera settings rejected: {exc}")
+                    await websocket.send(json.dumps({
+                        'event': 'error',
+                        'message': 'Invalid camera settings payload'
+                    }))
+                    continue
+                await websocket.send(json.dumps(camera_settings_response_payload(applied)))
+                continue
+
+            elif event == 'save_camera_settings':
+                try:
+                    settings_path = save_project_camera_settings(active_project_path)
+                    await websocket.send(json.dumps({
+                        'event': 'camera_settings_saved',
+                        'type': 'camera_settings_saved',
+                        'path': settings_path,
+                    }))
+                except Exception as exc:
+                    print(f"[APP] Save camera settings failed: {exc}")
+                    await websocket.send(json.dumps({
+                        'event': 'error',
+                        'message': f'Save camera settings failed: {exc}'
+                    }))
+                continue
+
+            elif event == 'start_camera_calibration_preview':
+                if camera_calibration_task and not camera_calibration_task.done():
+                    await websocket.send(json.dumps({
+                        'event': 'info',
+                        'message': 'Camera calibration preview already active'
+                    }))
+                    continue
+                if capture_task and not capture_task.done():
+                    await websocket.send(json.dumps({
+                        'event': 'error',
+                        'message': 'Cannot start camera calibration preview during capture'
+                    }))
+                    continue
+                if focus_task and not focus_task.done():
+                    await websocket.send(json.dumps({
+                        'event': 'error',
+                        'message': 'Cannot start camera calibration preview while focus preview is active'
+                    }))
+                    continue
+
+                initialize_project_camera_settings(active_project_path, apply=False)
+                camera_calibration_stop_event = asyncio.Event()
+                preview_width = data.get('preview_width', 800)
+                fps = data.get('fps', 5)
+                camera_calibration_task = asyncio.create_task(
+                    run_camera_calibration_preview(
+                        websocket,
+                        camera_calibration_stop_event,
+                        preview_width=preview_width,
+                        fps=fps,
+                    )
+                )
+                continue
+
+            elif event == 'stop_camera_calibration_preview':
+                if camera_calibration_task and not camera_calibration_task.done():
+                    camera_calibration_stop_event.set()
+                    try:
+                        await camera_calibration_task
+                    finally:
+                        camera_calibration_task = None
+                        camera_calibration_stop_event = None
+                else:
+                    await websocket.send(json.dumps({
+                        'event': 'info',
+                        'message': 'Camera calibration preview not active'
+                    }))
+                continue
+
             if event == 'start_capture':
                 if capture_task and not capture_task.done():
                     await websocket.send(json.dumps({
@@ -1612,6 +1997,12 @@ async def handle_client(websocket):
                     await websocket.send(json.dumps({
                         'event': 'error',
                         'message': 'Cannot start capture while focus is active'
+                    }))
+                    continue
+                if camera_calibration_task and not camera_calibration_task.done():
+                    await websocket.send(json.dumps({
+                        'event': 'error',
+                        'message': 'Cannot start capture while camera calibration preview is active'
                     }))
                     continue
                 if not active_project_path:
@@ -1676,7 +2067,7 @@ async def handle_client(websocket):
                     camera.start()
                     print("[APP] LED on + camera, stabilizing for calibration preview...")
                     await asyncio.sleep(0.5)
-                    exposure_result = await tune_calibration_exposure(camera, detector)
+                    exposure_result = await prepare_calibration_camera_settings(detector)
 
                     measurement, jpg_bytes = calibrator.capture_sprocket_preview(debug_scale)
 
@@ -1902,7 +2293,7 @@ async def handle_client(websocket):
                     camera.start()
                     print("[APP] LED on + camera, stabilizing for calibration sweep...")
                     await asyncio.sleep(0.5)
-                    exposure_result = await tune_calibration_exposure(camera, detector)
+                    exposure_result = await prepare_calibration_camera_settings(detector)
                     seek_result = await seek_two_full_sprockets(
                         camera,
                         tc,
@@ -2129,6 +2520,12 @@ async def handle_client(websocket):
                         'message': 'Cannot start focus during capture'
                     }))
                     continue
+                if camera_calibration_task and not camera_calibration_task.done():
+                    await websocket.send(json.dumps({
+                        'event': 'error',
+                        'message': 'Cannot start focus while camera calibration preview is active'
+                    }))
+                    continue
                 focus_stop_event = asyncio.Event()
                 preview_width = data.get('preview_width', 800)
                 fps = data.get('fps', 5)
@@ -2191,6 +2588,16 @@ async def handle_client(websocket):
             finally:
                 focus_task = None
                 focus_stop_event = None
+        if camera_calibration_task and not camera_calibration_task.done():
+            print("[APP] Cleaning up camera calibration preview task after disconnect")
+            camera_calibration_stop_event.set()
+            try:
+                await camera_calibration_task
+            except Exception as exc:
+                print(f"[APP] Camera calibration preview cleanup error: {exc}")
+            finally:
+                camera_calibration_task = None
+                camera_calibration_stop_event = None
 
 async def main():
     print("Starting WebSocket server on ws://0.0.0.0:5000")
