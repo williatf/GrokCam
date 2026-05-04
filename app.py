@@ -9,6 +9,7 @@ import time
 import base64
 import json
 from control import tcControl
+from registration import RegistrationTracker
 from sprocket import SprocketDetector
 from calibration_service import CalibrationService
 import socket
@@ -103,7 +104,7 @@ async def troubleshoot_sprocket_detection(camera, websocket, tc, detector,
     camera.stop()
     print("[TROUBLE] Troubleshooting mode exited cleanly")
 
-def draw_sprockets_debug(frame, sprockets, registration_y=None):
+def draw_sprockets_debug(frame, sprockets, registration_y=None, crop_rect=None, crop_clamped=False):
     """
     Draw bounding boxes, centers, and labels for detected sprockets.
     Always returns a valid flipped debug frame.
@@ -116,12 +117,16 @@ def draw_sprockets_debug(frame, sprockets, registration_y=None):
     cv2.line(debug_frame, (roi_right, roi_y1), (roi_right, roi_y2 - 1), (0, 255, 255), 2)
     cv2.rectangle(debug_frame, (max(0, roi_x1), roi_y1), (max(0, roi_x2 - 1), roi_y2 - 1), (0, 255, 255), 1)
 
-    if registration_y is not None:
+    if crop_rect is None and registration_y is not None:
         try:
-            crop_x1, crop_y1, crop_x2, crop_y2 = get_relative_crop_rect(frame, registration_y)
-            cv2.rectangle(debug_frame, (crop_x1, crop_y1), (crop_x2, crop_y2), (255, 255, 0), 2)
+            crop_rect = get_relative_crop_rect(frame, registration_y)
         except Exception:
-            pass
+            crop_rect = None
+
+    if crop_rect is not None:
+        crop_x1, crop_y1, crop_x2, crop_y2 = crop_rect
+        crop_color = (0, 165, 255) if crop_clamped else (255, 255, 0)
+        cv2.rectangle(debug_frame, (crop_x1, crop_y1), (crop_x2, crop_y2), crop_color, 2)
 
     # draw sprocket boxes if any
     if sprockets:
@@ -191,18 +196,7 @@ def crop_film_frame(frame, anchor, pitch_px=None):
     return flipped
 
 
-def get_registration_y(frame_bgr, sprockets):
-    registration = detector.choose_registration(
-        sprockets,
-        frame_bgr.shape,
-        expected_pitch=SPROCKET_PITCH_PX,
-    )
-    if registration.get('mode') in ('pair', 'single') and registration.get('actual_y') is not None:
-        return float(registration['actual_y'])
-    return None
-
-
-def get_capture_registration(frame_bgr, sprockets):
+def get_raw_registration(frame_bgr, sprockets):
     registration = detector.choose_registration(
         sprockets,
         frame_bgr.shape,
@@ -213,7 +207,17 @@ def get_capture_registration(frame_bgr, sprockets):
     return {
         'registration_y': float(actual_y) if actual_y is not None else None,
         'mode': mode if mode in ('pair', 'single') else 'none',
+        'target_y': registration.get('target_y'),
+        'error_px': registration.get('error_px'),
     }
+
+
+def get_registration_y(frame_bgr, sprockets):
+    return get_raw_registration(frame_bgr, sprockets).get('registration_y')
+
+
+def get_capture_registration(frame_bgr, sprockets):
+    return get_raw_registration(frame_bgr, sprockets)
 
 
 async def reacquire_pair_registration(camera, tc, detector, target_y, step_size=10, max_steps=300, reacquire_tolerance_px=80):
@@ -273,11 +277,20 @@ async def reacquire_pair_registration(camera, tc, detector, target_y, step_size=
     }
 
 
-def get_relative_crop_rect(frame_bgr, registration_y):
+def get_relative_crop_rect(frame_bgr, registration_y, return_metadata=False):
     frame_h, frame_w = frame_bgr.shape[:2]
     crop_settings = settings.get('crop')
+    crop_meta = {
+        'crop_y1': 0,
+        'crop_y2': int(frame_h),
+        'crop_clamped': False,
+    }
+
     if not isinstance(crop_settings, dict) or registration_y is None:
-        return 0, 0, frame_w, frame_h
+        rect = (0, 0, frame_w, frame_h)
+        if return_metadata:
+            return rect, crop_meta
+        return rect
 
     try:
         x1 = int(crop_settings['x1'])
@@ -285,10 +298,16 @@ def get_relative_crop_rect(frame_bgr, registration_y):
         y_offset = float(crop_settings['y_offset'])
         height = int(crop_settings['height'])
     except (KeyError, TypeError, ValueError):
-        return 0, 0, frame_w, frame_h
+        rect = (0, 0, frame_w, frame_h)
+        if return_metadata:
+            return rect, crop_meta
+        return rect
 
     if height <= 0:
-        return 0, 0, frame_w, frame_h
+        rect = (0, 0, frame_w, frame_h)
+        if return_metadata:
+            return rect, crop_meta
+        return rect
 
     x1 = max(0, min(frame_w - 1, x1))
     x2 = max(x1 + 1, min(frame_w, x2))
@@ -297,16 +316,27 @@ def get_relative_crop_rect(frame_bgr, registration_y):
     y2 = y1 + height
 
     if y1 < 0:
+        crop_meta['crop_clamped'] = True
         y2 = min(frame_h, y2 - y1)
         y1 = 0
     if y2 > frame_h:
+        crop_meta['crop_clamped'] = True
         y1 = max(0, y1 - (y2 - frame_h))
         y2 = frame_h
 
     if y2 <= y1:
-        return 0, 0, frame_w, frame_h
+        crop_meta['crop_clamped'] = True
+        rect = (0, 0, frame_w, frame_h)
+        if return_metadata:
+            return rect, crop_meta
+        return rect
 
-    return int(x1), int(y1), int(x2), int(y2)
+    rect = (int(x1), int(y1), int(x2), int(y2))
+    crop_meta['crop_y1'] = int(y1)
+    crop_meta['crop_y2'] = int(y2)
+    if return_metadata:
+        return rect, crop_meta
+    return rect
 
 
 def crop_frame_relative_to_registration(frame_bgr, registration_y):
@@ -520,6 +550,8 @@ def refresh_runtime_settings():
     print("[APP] Runtime calibration settings refreshed")
     if previous_resolution is not None and tuple(previous_resolution) != CALIBRATION_RES:
         print("[APP] Calibration resolution changed; service restart recommended to reconfigure camera")
+    if 'registration_tracker' in globals():
+        registration_tracker.reset(expected_sprocket_pitch_px=SPROCKET_PITCH_PX)
 
 settings = load_settings()
 print("Loaded settings:")
@@ -873,6 +905,18 @@ detector = SprocketDetector(
     method="profile"
 )
 
+registration_tracker = RegistrationTracker(
+    expected_sprocket_pitch_px=SPROCKET_PITCH_PX,
+    max_jump_px=40.0,
+    smoothing_alpha=0.8,
+)
+
+
+def reset_registration_tracking(reason=None):
+    registration_tracker.reset(expected_sprocket_pitch_px=SPROCKET_PITCH_PX)
+    if reason:
+        print(f"[APP] Registration tracker reset: {reason}")
+
 calibrator = CalibrationService(camera, tc, detector, settings)
 
 last_error = 0 # difference between actual and target for sprocket detection
@@ -1072,6 +1116,7 @@ def create_or_select_project(project_name):
         handle.write("\n")
 
     set_active_project(metadata["project_name"], safe_name, project_path)
+    reset_registration_tracking("project_selected")
     return {
         "name": metadata["project_name"],
         "safe_name": safe_name,
@@ -1122,6 +1167,15 @@ def get_next_project_frame_number(frames_path):
 
     return max_frame_number + 1
 
+
+def append_registration_metadata(metadata_path, payload):
+    try:
+        with open(metadata_path, 'a', encoding='utf-8') as handle:
+            json.dump(payload, handle)
+            handle.write('\n')
+    except Exception as exc:
+        print(f"[APP] Registration metadata write failed: {exc}")
+
 async def run_capture(websocket, num_frames, stop_event, preview_width=800, debug_scale=1.0):
     print("[APP] Capture task starting")
     if not active_project_path:
@@ -1130,12 +1184,19 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
     project_name = active_project_name
     project_path = active_project_path
     frames_path = os.path.join(project_path, "frames")
+    debug_path = os.path.join(project_path, "debug")
     os.makedirs(frames_path, exist_ok=True)
+    os.makedirs(debug_path, exist_ok=True)
     next_frame_number = get_next_project_frame_number(frames_path)
+    metadata_path = os.path.join(
+        debug_path,
+        f"registration_metadata_{time.strftime('%Y%m%d-%H%M%S')}.jsonl",
+    )
 
     tc.light_on()
     apply_capture_camera_controls()
     camera.start()
+    reset_registration_tracking("capture_start")
     print("[APP] LED on + camera, stabilizing...")
     try:
         await asyncio.sleep(2)
@@ -1176,12 +1237,43 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
             classified_sprockets = detector.classify_sprockets(sprockets if sprockets else [], frame_bgr.shape)
             full_count = sum(1 for item in classified_sprockets if item.get('status') == 'full')
             partial_count = sum(1 for item in classified_sprockets if item.get('status') == 'partial')
-            capture_registration = get_capture_registration(frame_bgr, sprockets if sprockets else [])
-            registration_y = capture_registration.get('registration_y')
-            registration_mode = capture_registration.get('mode', 'none')
-            debug_frame = draw_sprockets_debug(frame_bgr, sprockets if sprockets else [], registration_y=registration_y)
+            raw_registration = get_capture_registration(frame_bgr, sprockets if sprockets else [])
+            raw_registration_y = raw_registration.get('registration_y')
+            raw_registration_mode = raw_registration.get('mode', 'none')
+            tracked_registration = registration_tracker.update(
+                raw_registration_y=raw_registration_y,
+                raw_registration_mode=raw_registration_mode,
+                frame_index=frame + 1,
+                expected_sprocket_pitch_px=SPROCKET_PITCH_PX,
+            )
+            registration_y = tracked_registration.get('stable_registration_y')
+            crop_rect, crop_meta = get_relative_crop_rect(frame_bgr, registration_y, return_metadata=True)
+            debug_frame = draw_sprockets_debug(
+                frame_bgr,
+                sprockets if sprockets else [],
+                registration_y=registration_y,
+                crop_rect=crop_rect,
+                crop_clamped=bool(crop_meta.get('crop_clamped')),
+            )
 
-            if registration_mode == 'pair':
+            if tracked_registration.get('registration_rejected'):
+                print(
+                    f"[APP] Frame {frame}: registration rejected raw={raw_registration_y} "
+                    f"mode={raw_registration_mode} predicted={tracked_registration.get('predicted_registration_y')}"
+                )
+            elif tracked_registration.get('registration_estimated'):
+                print(
+                    f"[APP] Frame {frame}: using estimated registration_y="
+                    f"{tracked_registration.get('selected_registration_y')}"
+                )
+
+            if crop_meta.get('crop_clamped'):
+                print(
+                    f"[APP] Frame {frame}: crop clamped to y1={crop_meta.get('crop_y1')} "
+                    f"y2={crop_meta.get('crop_y2')}"
+                )
+
+            if raw_registration_mode == 'pair':
                 missing_pair_count = 0
             else:
                 missing_pair_count += 1
@@ -1193,22 +1285,22 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
 
             steps_before_update = current_steps
 
-            if registration_y is None:
+            if raw_registration_y is None:
                 next_steps = max(min_steps, min(max_steps, base_steps))
                 current_steps = next_steps
-                if registration_mode != 'pair':
+                if raw_registration_mode != 'pair':
                     print(
                         f"[APP] Frame {frame}: pair unavailable: count={sprocket_count}, "
-                        f"full={full_count}, partial={partial_count}, mode={registration_mode}"
+                        f"full={full_count}, partial={partial_count}, mode={raw_registration_mode}"
                     )
                 print(
-                    f"[APP] Frame {frame}: reg=n/a, mode={registration_mode}, count={sprocket_count}, "
+                    f"[APP] Frame {frame}: reg=n/a, mode={raw_registration_mode}, count={sprocket_count}, "
                     f"full={full_count}, partial={partial_count}, err=n/a, steps={steps_before_update}, correction=+0, next={next_steps}"
                 )
             else:
-                error_px = float(target_y) - float(registration_y)
-                update_allowed = registration_mode == 'pair' and full_count == 2 and partial_count == 0
-                if registration_mode == 'pair' and partial_count > 0:
+                error_px = float(target_y) - float(raw_registration_y)
+                update_allowed = raw_registration_mode == 'pair' and full_count == 2 and partial_count == 0
+                if raw_registration_mode == 'pair' and partial_count > 0:
                     print(f"[APP] Frame {frame}: ignoring partial pair for step update")
 
                 correction = 0
@@ -1230,12 +1322,12 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
                     current_steps = next_steps
                     print(
                         f"[APP] Frame {frame}: pair unavailable: count={sprocket_count}, "
-                        f"full={full_count}, partial={partial_count}, mode={registration_mode}"
+                        f"full={full_count}, partial={partial_count}, mode={raw_registration_mode}"
                     )
                     print(f"[APP] Frame {frame}: ignoring low-confidence registration for step update")
 
                 print(
-                    f"[APP] Frame {frame}: reg={registration_y:.1f}, mode={registration_mode}, "
+                    f"[APP] Frame {frame}: reg={raw_registration_y:.1f}, mode={raw_registration_mode}, "
                     f"count={sprocket_count}, full={full_count}, partial={partial_count}, "
                     f"err={error_px:+.1f}px, steps={steps_before_update}, "
                     f"correction={correction:+d}, next={next_steps}"
@@ -1274,7 +1366,8 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
                         f"steps={reacquire_result.get('steps')}; resetting current_steps={current_steps}"
                     )
 
-            frame_cropped = crop_frame_relative_to_registration(frame_bgr, registration_y)
+            crop_x1, crop_y1, crop_x2, crop_y2 = crop_rect
+            frame_cropped = frame_bgr[crop_y1:crop_y2, crop_x1:crop_x2]
             # Flip vertically to correct camera orientation (matches legacy behavior)
             frame_cropped = cv2.flip(frame_cropped, 0)
 
@@ -1287,6 +1380,26 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
                     'event': 'warning',
                     'message': f'Failed to save frame {frame} to disk'
                 }))
+
+            frame_metadata = {
+                'frame_index': int(frame + 1),
+                'frame_number': int(frame_number),
+                'raw_registration_y': tracked_registration.get('raw_registration_y'),
+                'raw_registration_mode': tracked_registration.get('raw_registration_mode'),
+                'selected_registration_y': tracked_registration.get('selected_registration_y'),
+                'smoothed_registration_y': tracked_registration.get('smoothed_registration_y'),
+                'predicted_registration_y': tracked_registration.get('predicted_registration_y'),
+                'registration_error_px': tracked_registration.get('registration_error_px'),
+                'registration_estimated': bool(tracked_registration.get('registration_estimated')),
+                'registration_rejected': bool(tracked_registration.get('registration_rejected')),
+                'registration_accepted': bool(tracked_registration.get('registration_accepted')),
+                'crop_y1': int(crop_meta.get('crop_y1', crop_y1)),
+                'crop_y2': int(crop_meta.get('crop_y2', crop_y2)),
+                'crop_clamped': bool(crop_meta.get('crop_clamped')),
+                'failure_count': int(tracked_registration.get('failure_count', 0)),
+                'saved_frame_path': filename,
+            }
+            append_registration_metadata(metadata_path, frame_metadata)
 
             scale_w = max(1, int(preview_width))
             scale_h = int(frame_cropped.shape[0] * (scale_w / frame_cropped.shape[1]))
