@@ -592,6 +592,10 @@ current_camera_settings = {
     'timestamp': None,
 }
 
+active_project_name = None
+active_project_safe_name = None
+active_project_path = None
+
 # --- Initialize transport ---
 print("Starting WebSocket server")
 tc = tcControl()
@@ -1261,11 +1265,6 @@ async def advance_to_next_perforation(camera,
 
 PROJECTS_BASE_DIR = "/media/williatf/SG1TB/GrokCam/projects"
 os.makedirs(PROJECTS_BASE_DIR, exist_ok=True)
-
-active_project_name = None
-active_project_safe_name = None
-active_project_path = None
-
 
 def sanitize_project_name(name):
     cleaned = str(name or "").strip()
