@@ -5,22 +5,22 @@ class RegistrationTracker:
         self.smoothing_alpha = max(0.0, min(1.0, float(smoothing_alpha)))
         self.reset(expected_sprocket_pitch_px=expected_sprocket_pitch_px)
 
-    def reset(self, expected_sprocket_pitch_px=None):
+    def reset(self, expected_sprocket_pitch_px=None, baseline_registration_y=None):
         if expected_sprocket_pitch_px is not None:
             self.expected_sprocket_pitch_px = float(expected_sprocket_pitch_px)
 
-        self.last_good_registration_y = None
-        self.smoothed_registration_y = None
-        self.last_good_mode = None
+        self.baseline_registration_y = float(baseline_registration_y) if baseline_registration_y is not None else None
+        self.last_good_registration_y = float(baseline_registration_y) if baseline_registration_y is not None else None
         self.frame_index = 0
         self.failure_count = 0
+        self.last_selected_source = None
 
     def predicted_y(self):
-        if self.smoothed_registration_y is not None:
-            return float(self.smoothed_registration_y)
         if self.last_good_registration_y is not None:
             return float(self.last_good_registration_y)
-        return None
+        if self.baseline_registration_y is None:
+            return None
+        return float(self.baseline_registration_y)
 
     def update(self, raw_registration_y, raw_registration_mode, frame_index=None, expected_sprocket_pitch_px=None):
         if expected_sprocket_pitch_px is not None:
@@ -29,92 +29,89 @@ class RegistrationTracker:
         self.frame_index = int(frame_index) if frame_index is not None else (self.frame_index + 1)
         raw_mode = raw_registration_mode if raw_registration_mode in ("pair", "single") else "none"
         raw_y = float(raw_registration_y) if raw_registration_y is not None else None
-        predicted_y = self.predicted_y()
-
+        reference_y = self.predicted_y()
+        raw_pair_midpoint_y = raw_y if raw_mode == "pair" else None
+        single_sprocket_y = raw_y if raw_mode == "single" else None
         selected_y = None
-        selected_mode = raw_mode
-        accepted = False
+        selected_source = None
+        registration_error_px = None
         estimated = False
         rejected = False
 
-        if raw_mode == "pair" and raw_y is not None:
-            selected_y = raw_y
-            if predicted_y is None or self._is_acceptable_jump(selected_y, predicted_y):
-                accepted = True
-                selected_mode = "pair"
-            else:
-                rejected = True
-
-        elif raw_mode == "single" and raw_y is not None:
-            candidates = self._single_mode_candidates(raw_y)
-            if predicted_y is None:
-                selected_y = candidates[0]
-            else:
-                selected_y = min(candidates, key=lambda candidate: abs(candidate - predicted_y))
-
-            if predicted_y is None or self._is_acceptable_jump(selected_y, predicted_y):
-                accepted = True
-                selected_mode = "single"
-            else:
-                rejected = True
-
-        if accepted and selected_y is not None:
+        if raw_pair_midpoint_y is not None:
+            if self.baseline_registration_y is None:
+                self.baseline_registration_y = float(raw_pair_midpoint_y)
+            self.last_good_registration_y = float(raw_pair_midpoint_y)
+            selected_y = float(raw_pair_midpoint_y)
+            selected_source = "pair_actual"
             self.failure_count = 0
-            self.last_good_registration_y = float(selected_y)
-            self.last_good_mode = selected_mode
+            if reference_y is not None:
+                registration_error_px = float(raw_pair_midpoint_y) - float(reference_y)
 
-            if self.smoothed_registration_y is None:
-                self.smoothed_registration_y = float(selected_y)
-            else:
-                self.smoothed_registration_y = (
-                    (self.smoothing_alpha * float(self.smoothed_registration_y))
-                    + ((1.0 - self.smoothing_alpha) * float(selected_y))
-                )
-        else:
-            self.failure_count += 1
-            fallback_y = predicted_y if predicted_y is not None else self.last_good_registration_y
-            if fallback_y is not None:
-                selected_y = float(fallback_y)
-                estimated = True
-                selected_mode = self.last_good_mode or raw_mode
+        elif single_sprocket_y is not None:
+            if reference_y is not None:
+                candidates = self._single_mode_candidates(single_sprocket_y)
+                if candidates:
+                    estimated_midpoint = min(candidates, key=lambda candidate: abs(candidate - reference_y))
+                    registration_error_px = float(estimated_midpoint) - float(reference_y)
+                    if self._is_acceptable_jump(estimated_midpoint, reference_y):
+                        selected_y = float(estimated_midpoint)
+                        selected_source = "single_estimated"
+                        estimated = True
+                        self.last_good_registration_y = float(estimated_midpoint)
+                        self.failure_count = 0
+                    else:
+                        selected_y = float(reference_y)
+                        selected_source = "rejected_single"
+                        rejected = True
+                        estimated = True
+                        self.failure_count += 1
+                else:
+                    selected_y = float(reference_y)
+                    selected_source = "rejected_single"
+                    rejected = True
+                    estimated = True
+                    self.failure_count += 1
             else:
                 selected_y = None
+                selected_source = None
+                self.failure_count += 1
 
-        crop_anchor_y = None
-        if self.smoothed_registration_y is not None:
-            crop_anchor_y = float(self.smoothed_registration_y)
-        elif selected_y is not None:
-            crop_anchor_y = float(selected_y)
+        else:
+            if reference_y is not None:
+                selected_y = float(reference_y)
+                selected_source = "held_last_good"
+                estimated = True
+            else:
+                selected_y = None
+                selected_source = None
+            self.failure_count += 1
 
-        registration_error_px = None
-        if selected_y is not None and predicted_y is not None:
-            registration_error_px = float(selected_y) - float(predicted_y)
+        self.last_selected_source = selected_source
 
         return {
             "frame_index": int(self.frame_index),
             "raw_registration_y": raw_y,
             "raw_registration_mode": raw_mode,
+            "raw_pair_midpoint_y": raw_pair_midpoint_y,
+            "single_sprocket_y": single_sprocket_y,
+            "baseline_registration_y": float(self.baseline_registration_y) if self.baseline_registration_y is not None else None,
             "selected_registration_y": float(selected_y) if selected_y is not None else None,
-            "smoothed_registration_y": float(self.smoothed_registration_y) if self.smoothed_registration_y is not None else None,
-            "predicted_registration_y": float(predicted_y) if predicted_y is not None else None,
+            "last_good_registration_y": float(self.last_good_registration_y) if self.last_good_registration_y is not None else None,
             "registration_error_px": registration_error_px,
             "registration_estimated": bool(estimated),
             "registration_rejected": bool(rejected),
-            "registration_accepted": bool(accepted),
-            "selected_mode": selected_mode,
-            "stable_registration_y": crop_anchor_y,
+            "selected_source": selected_source,
+            "stable_registration_y": float(selected_y) if selected_y is not None else reference_y,
             "failure_count": int(self.failure_count),
-            "last_good_mode": self.last_good_mode,
         }
 
     def _single_mode_candidates(self, raw_y):
-        candidates = [float(raw_y)]
         if self.expected_sprocket_pitch_px is None or self.expected_sprocket_pitch_px <= 0:
-            return candidates
+            return []
 
         half_pitch = float(self.expected_sprocket_pitch_px) / 2.0
         return [
-            float(raw_y),
             float(raw_y) + half_pitch,
             float(raw_y) - half_pitch,
         ]

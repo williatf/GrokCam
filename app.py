@@ -551,7 +551,7 @@ def refresh_runtime_settings():
     if previous_resolution is not None and tuple(previous_resolution) != CALIBRATION_RES:
         print("[APP] Calibration resolution changed; service restart recommended to reconfigure camera")
     if 'registration_tracker' in globals():
-        registration_tracker.reset(expected_sprocket_pitch_px=SPROCKET_PITCH_PX)
+        reset_registration_tracking("runtime_settings_refresh")
 
 settings = load_settings()
 print("Loaded settings:")
@@ -911,9 +911,18 @@ registration_tracker = RegistrationTracker(
     smoothing_alpha=0.8,
 )
 
+latest_crop_preview_pair_midpoint = None
+calibrated_baseline_registration_y = None
 
-def reset_registration_tracking(reason=None):
-    registration_tracker.reset(expected_sprocket_pitch_px=SPROCKET_PITCH_PX)
+
+def reset_registration_tracking(reason=None, baseline_registration_y=None):
+    seed_baseline = baseline_registration_y
+    if seed_baseline is None:
+        seed_baseline = calibrated_baseline_registration_y
+    registration_tracker.reset(
+        expected_sprocket_pitch_px=SPROCKET_PITCH_PX,
+        baseline_registration_y=seed_baseline,
+    )
     if reason:
         print(f"[APP] Registration tracker reset: {reason}")
 
@@ -1089,6 +1098,7 @@ def set_active_project(project_name, project_safe_name, project_path):
 
 
 def create_or_select_project(project_name):
+    global latest_crop_preview_pair_midpoint, calibrated_baseline_registration_y
     safe_name = sanitize_project_name(project_name)
     project_path, frames_path, debug_path, metadata_path = get_project_paths(safe_name)
     os.makedirs(frames_path, exist_ok=True)
@@ -1116,6 +1126,8 @@ def create_or_select_project(project_name):
         handle.write("\n")
 
     set_active_project(metadata["project_name"], safe_name, project_path)
+    latest_crop_preview_pair_midpoint = None
+    calibrated_baseline_registration_y = None
     reset_registration_tracking("project_selected")
     return {
         "name": metadata["project_name"],
@@ -1256,15 +1268,17 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
                 crop_clamped=bool(crop_meta.get('crop_clamped')),
             )
 
-            if tracked_registration.get('registration_rejected'):
+            selected_source = tracked_registration.get('selected_source')
+
+            if selected_source == 'rejected_single':
                 print(
-                    f"[APP] Frame {frame}: registration rejected raw={raw_registration_y} "
-                    f"mode={raw_registration_mode} predicted={tracked_registration.get('predicted_registration_y')}"
+                    f"[APP] Frame {frame}: rejected single estimate raw={tracked_registration.get('single_sprocket_y')} "
+                    f"last_good={tracked_registration.get('last_good_registration_y')}"
                 )
-            elif tracked_registration.get('registration_estimated'):
+            elif selected_source == 'held_last_good':
                 print(
-                    f"[APP] Frame {frame}: using estimated registration_y="
-                    f"{tracked_registration.get('selected_registration_y')}"
+                    f"[APP] Frame {frame}: no registration found; holding last good "
+                    f"{tracked_registration.get('last_good_registration_y')}"
                 )
 
             if crop_meta.get('crop_clamped'):
@@ -1384,15 +1398,15 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
             frame_metadata = {
                 'frame_index': int(frame + 1),
                 'frame_number': int(frame_number),
-                'raw_registration_y': tracked_registration.get('raw_registration_y'),
                 'raw_registration_mode': tracked_registration.get('raw_registration_mode'),
+                'raw_registration_y': tracked_registration.get('raw_registration_y'),
+                'raw_pair_midpoint_y': tracked_registration.get('raw_pair_midpoint_y'),
+                'single_sprocket_y': tracked_registration.get('single_sprocket_y'),
+                'last_good_registration_y': tracked_registration.get('last_good_registration_y'),
+                'baseline_registration_y': tracked_registration.get('baseline_registration_y'),
                 'selected_registration_y': tracked_registration.get('selected_registration_y'),
-                'smoothed_registration_y': tracked_registration.get('smoothed_registration_y'),
-                'predicted_registration_y': tracked_registration.get('predicted_registration_y'),
+                'selected_source': tracked_registration.get('selected_source'),
                 'registration_error_px': tracked_registration.get('registration_error_px'),
-                'registration_estimated': bool(tracked_registration.get('registration_estimated')),
-                'registration_rejected': bool(tracked_registration.get('registration_rejected')),
-                'registration_accepted': bool(tracked_registration.get('registration_accepted')),
                 'crop_y1': int(crop_meta.get('crop_y1', crop_y1)),
                 'crop_y2': int(crop_meta.get('crop_y2', crop_y2)),
                 'crop_clamped': bool(crop_meta.get('crop_clamped')),
@@ -1690,6 +1704,7 @@ async def handle_client(websocket):
                 continue
 
             elif event == 'crop_calibration_preview':
+                global latest_crop_preview_pair_midpoint
                 if capture_task and not capture_task.done():
                     await websocket.send(json.dumps({
                         'event': 'error',
@@ -1719,7 +1734,10 @@ async def handle_client(websocket):
                         raise RuntimeError('Failed to decode crop calibration preview frame')
 
                     sprockets = detector.detect(frame_bgr, mode='profile') or []
-                    registration_y = get_registration_y(frame_bgr, sprockets)
+                    raw_registration = get_capture_registration(frame_bgr, sprockets)
+                    registration_y = raw_registration.get('registration_y')
+                    registration_mode = raw_registration.get('mode', 'none')
+                    latest_crop_preview_pair_midpoint = registration_y if registration_mode == 'pair' else None
 
                     preview_frame = frame_bgr.copy()
                     frame_height = preview_frame.shape[0]
@@ -1756,6 +1774,7 @@ async def handle_client(websocket):
                         'preview_height': int(preview_height),
                         'display_flipped_vertical': True,
                         'registration_y': registration_y,
+                        'registration_mode': registration_mode,
                         'existing_crop': existing_crop,
                         'size': len(jpg_bytes)
                     }))
@@ -1775,6 +1794,7 @@ async def handle_client(websocket):
                 continue
 
             elif event == 'crop_calibration_save':
+                global calibrated_baseline_registration_y
                 rect = data.get('rect')
                 preview_rect = data.get('preview_rect')
                 registration_y = data.get('registration_y')
@@ -1832,6 +1852,12 @@ async def handle_client(websocket):
                     registration_y = float(registration_y)
 
                     crop_data = save_crop_settings((x1, y1, x2, y2), registration_y, (frame_w, frame_h))
+                    if latest_crop_preview_pair_midpoint is not None:
+                        calibrated_baseline_registration_y = float(latest_crop_preview_pair_midpoint)
+                        reset_registration_tracking(
+                            "crop_calibration_saved",
+                            baseline_registration_y=calibrated_baseline_registration_y,
+                        )
                     refresh_runtime_settings()
 
                     await websocket.send(json.dumps({
