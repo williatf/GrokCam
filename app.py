@@ -1405,7 +1405,11 @@ async def advance_to_next_perforation(camera,
         await asyncio.sleep(0.01)
 
 
-PROJECTS_BASE_DIR = "/mnt/SG1TB/GrokCam/projects"
+PROJECTS_MOUNT_POINT = "/mnt/SG1TB"
+if not os.path.ismount(PROJECTS_MOUNT_POINT):
+    raise RuntimeError(f"Project storage drive is not mounted: {PROJECTS_MOUNT_POINT}")
+
+PROJECTS_BASE_DIR = os.path.join(PROJECTS_MOUNT_POINT, "GrokCam", "projects")
 os.makedirs(PROJECTS_BASE_DIR, exist_ok=True)
 
 def sanitize_project_name(name):
