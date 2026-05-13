@@ -1405,7 +1405,7 @@ async def advance_to_next_perforation(camera,
         await asyncio.sleep(0.01)
 
 
-PROJECTS_BASE_DIR = "/media/williatf/SG1TB/GrokCam/projects"
+PROJECTS_BASE_DIR = "/mnt/SG1TB/GrokCam/projects"
 os.makedirs(PROJECTS_BASE_DIR, exist_ok=True)
 
 def sanitize_project_name(name):
