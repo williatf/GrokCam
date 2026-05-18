@@ -24,6 +24,7 @@ async def troubleshoot_sprocket_detection(camera, websocket, tc, detector,
     Bi-directional sprocket troubleshooting loop.
     The client can send:
       - {"event": "next_step"} → move + capture + send debug frame
+            - {"event": "prev_step"} → move backward + capture + send debug frame
       - {"event": "stop_troubleshoot"} → exit loop
     """
     print("[TROUBLE] Entering interactive sprocket troubleshooting mode")
@@ -41,10 +42,15 @@ async def troubleshoot_sprocket_detection(camera, websocket, tc, detector,
         data = json.loads(msg)
         evt = data.get("event")
 
-        if evt == "next_step":
+        if evt == "next_step" or evt == "prev_step":
             frame_counter += 1
-            print(f"[TROUBLE] Step {frame_counter}: moving {step_size} steps")
-            tc.steps_forward(step_size)
+            moving_forward = evt == "next_step"
+            direction_label = "forward" if moving_forward else "backward"
+            print(f"[TROUBLE] Step {frame_counter}: moving {direction_label} {step_size} steps")
+            if moving_forward:
+                tc.steps_forward(step_size)
+            else:
+                tc.steps_back(step_size)
             await asyncio.sleep(delay)
 
             # --- capture & detect ---
@@ -86,7 +92,8 @@ async def troubleshoot_sprocket_detection(camera, websocket, tc, detector,
                 header = json.dumps({
                     "event": "troubleshoot_frame",
                     "frame": frame_counter,
-                    "sprocket_count": len(sprockets)
+                    "sprocket_count": len(sprockets),
+                    "direction": direction_label
                 })
                 await websocket.send(header)
                 await websocket.send(jpg.tobytes())
@@ -2668,17 +2675,14 @@ async def handle_client(websocket):
                 steps_per_pitch = STEPS_PER_PITCH
                 total_steps = max(0, frames) * steps_per_pitch
                 if direction > 0:
-                    print(f"[APP] Jogging forward {frames} frames ({total_steps} steps) before alignment")
+                    print(f"[APP] Jogging forward {frames} frames ({total_steps} steps)")
                     tc.steps_forward(total_steps)
                 else:
-                    print(f"[APP] Jogging backward {frames} frames ({total_steps} steps) before alignment")
+                    print(f"[APP] Jogging backward {frames} frames ({total_steps} steps)")
                     tc.steps_back(total_steps)
                     #tc.rewind()
 
-                # Capture image after jogging
-                anchor = await advance_to_next_perforation(camera, websocket,
-                    steps_per_pitch = settings.get("steps_per_pitch", 280), 
-                    steps_per_px = settings.get("steps_per_px", 0.5))
+                # Capture image immediately after jogging; manual alignment happens via next_step/prev_step.
                 buffer = io.BytesIO()
                 camera.capture_file(buffer, format='jpeg')
                 frame_bgr = cv2.imdecode(np.frombuffer(buffer.getvalue(), np.uint8), cv2.IMREAD_COLOR)
