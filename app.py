@@ -19,7 +19,7 @@ from datetime import datetime
 from collections import deque
 
 async def troubleshoot_sprocket_detection(camera, websocket, tc, detector,
-                                          step_size=10, delay=0.05):
+                                          step_size=None, delay=0.05):
     """
     Bi-directional sprocket troubleshooting loop.
     The client can send:
@@ -28,6 +28,9 @@ async def troubleshoot_sprocket_detection(camera, websocket, tc, detector,
       - {"event": "stop_troubleshoot"} → exit loop
     """
     print("[TROUBLE] Entering interactive sprocket troubleshooting mode")
+
+    if step_size is None:
+        step_size = max(1, int(round(STEPS_PER_PITCH * 0.25)))
 
     active = True
     frame_counter = 0
