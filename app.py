@@ -1835,8 +1835,12 @@ async def run_raw_capture(websocket, num_frames, stop_event):
         full_pixels_per_step = 1.0 / calibrated_steps_per_px if calibrated_steps_per_px > 0 else 9.0
         pixels_per_step = full_pixels_per_step * raw_preview_scale
         current_steps = base_steps
-        correction_gain = 0.4
-        max_correction = 6
+        # The 100-frame trace measured about 1.09 preview pixels per motor
+        # step and a zero-drift pitch near the calibrated 272-273 steps. Use a
+        # conservative proportional trim around that fixed baseline; do not
+        # integrate corrections into subsequent commands.
+        correction_gain = 0.25
+        max_correction = 4
         dead_band_px = 10.0 * raw_preview_scale
         min_steps = int(nominal_steps_per_pitch * 0.88)
         max_steps = int(nominal_steps_per_pitch * 1.12)
@@ -2022,11 +2026,7 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                 reacquire_steps = 0
                 reacquire_reason = None
                 reacquire_ms = 0.0
-                # Hold the last commanded pitch unless a trusted full pair
-                # explicitly asks for a change. Returning to a separate base
-                # here caused a six-step jump immediately after reaching the
-                # target (257 -> 263 in the live trace).
-                next_steps = max(min_steps, min(max_steps, int(current_steps)))
+                next_steps = max(min_steps, min(max_steps, int(base_steps)))
                 if raw_y is not None:
                     error_px = float(target_y) - float(raw_y)
                     update_allowed = (
@@ -2045,19 +2045,24 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                             # The live trace shows that increasing motor steps
                             # increases the detected pair's Y coordinate. Keep
                             # motor correction aligned with target_y - actual_y:
-                            # a pair below target gets fewer steps next frame.
+                            # actual_y greater than target_y gets fewer steps.
                             correction = int(round((error_px / pixels_per_step) * correction_gain))
                             correction = max(-max_correction, min(max_correction, correction))
                         next_steps = max(
                             min_steps,
-                            min(max_steps, int(current_steps + correction)),
+                            min(max_steps, int(base_steps + correction)),
                         )
                         current_steps = next_steps
-                        adaptive_base_steps = float(current_steps)
+                        adaptive_base_steps = float(base_steps)
                         trusted_step_history.append(int(current_steps))
                         previous_trusted_pair_y = float(raw_y)
+                    else:
+                        # Do not repeat a corrective command when registration
+                        # is partial or otherwise untrusted.
+                        current_steps = next_steps
                 else:
                     error_px = None
+                    current_steps = next_steps
 
                 if missing_pair_count >= 3:
                     reacquire_attempted = True
@@ -2071,11 +2076,8 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                     reacquire_valid = bool(reacquire.get('valid'))
                     reacquire_steps = int(reacquire.get('steps', 0))
                     reacquire_reason = reacquire.get('reason')
-                    current_steps = (
-                        int(round(float(np.median(np.array(trusted_step_history, dtype=float)))))
-                        if trusted_step_history else nominal_steps_per_pitch
-                    )
-                    adaptive_base_steps = float(current_steps)
+                    current_steps = nominal_steps_per_pitch
+                    adaptive_base_steps = float(base_steps)
                     if reacquire.get('valid'):
                         missing_pair_count = 0
                         reacquired_y = reacquire.get('registration_y')
