@@ -12,11 +12,16 @@ from control import tcControl
 from registration import RegistrationTracker
 from sprocket import SprocketDetector
 from calibration_service import CalibrationService
+from fast_sprocket import FastSprocketDetector
 import socket
 import os
 import re
 from datetime import datetime
 from collections import deque
+
+RAW_CAPTURE_MODE = 'raw_dng_v1'
+RAW_SENSOR_SIZE = (2028, 1520)
+RAW_PREVIEW_SIZE = (760, 570)
 
 async def troubleshoot_sprocket_detection(camera, websocket, tc, detector,
                                           step_size=None, delay=0.05):
@@ -249,7 +254,15 @@ async def reacquire_pair_registration(camera, tc, detector, target_y, step_size=
         classified = detector.classify_sprockets(sprockets, frame_bgr.shape)
         full_count = sum(1 for item in classified if item.get('status') == 'full')
         partial_count = sum(1 for item in classified if item.get('status') == 'partial')
-        registration = get_capture_registration(frame_bgr, sprockets)
+        registration_choice = detector.choose_registration(
+            sprockets,
+            frame_bgr.shape,
+            expected_pitch=detector.expected_pitch,
+        )
+        registration = {
+            'mode': registration_choice.get('mode', 'none'),
+            'registration_y': registration_choice.get('actual_y'),
+        }
 
         if registration.get('mode') == 'pair' and registration.get('registration_y') is not None:
             error_px = float(target_y) - float(registration.get('registration_y'))
@@ -353,6 +366,43 @@ def get_relative_crop_rect(frame_bgr, registration_y, return_metadata=False):
 def crop_frame_relative_to_registration(frame_bgr, registration_y):
     x1, y1, x2, y2 = get_relative_crop_rect(frame_bgr, registration_y)
     return frame_bgr[y1:y2, x1:x2]
+
+
+def get_scaled_relative_crop_rect(frame_bgr, registration_y, source_size=CALIBRATION_RES):
+    """Apply the calibrated full-resolution crop to a smaller preview stream."""
+    frame_h, frame_w = frame_bgr.shape[:2]
+    source_w, source_h = source_size
+    crop_settings = settings.get('crop')
+    if not isinstance(crop_settings, dict) or registration_y is None:
+        return (0, 0, frame_w, frame_h), {'crop_clamped': False}
+
+    scale_x = frame_w / float(source_w)
+    scale_y = frame_h / float(source_h)
+    try:
+        x1 = int(round(float(crop_settings['x1']) * scale_x))
+        x2 = int(round(float(crop_settings['x2']) * scale_x))
+        y1 = int(round(float(registration_y) + float(crop_settings['y_offset']) * scale_y))
+        height = max(1, int(round(float(crop_settings['height']) * scale_y)))
+    except (KeyError, TypeError, ValueError):
+        return (0, 0, frame_w, frame_h), {'crop_clamped': False}
+
+    x1 = max(0, min(frame_w - 1, x1))
+    x2 = max(x1 + 1, min(frame_w, x2))
+    y2 = y1 + height
+    clamped = False
+    if y1 < 0:
+        y2 -= y1
+        y1 = 0
+        clamped = True
+    if y2 > frame_h:
+        y1 = max(0, y1 - (y2 - frame_h))
+        y2 = frame_h
+        clamped = True
+    return (x1, y1, x2, y2), {
+        'crop_y1': y1,
+        'crop_y2': y2,
+        'crop_clamped': clamped,
+    }
 
 
 def save_crop_settings(rect, registration_y, frame_size):
@@ -620,6 +670,19 @@ print("Initializing camera")
 config_main = camera.create_still_configuration(main={"size": CALIBRATION_RES})
 camera.configure(config_main)
 camera.options['quality'] = 90
+
+
+def configure_legacy_camera():
+    camera.configure(camera.create_still_configuration(main={"size": CALIBRATION_RES}))
+    camera.options['quality'] = 90
+
+
+def configure_raw_camera():
+    camera.configure(camera.create_still_configuration(
+        main={"size": RAW_PREVIEW_SIZE, "format": "BGR888"},
+        raw={"size": RAW_SENSOR_SIZE, "format": "SRGGB12"},
+        buffer_count=2,
+    ))
 
 
 def get_camera_settings_path(project_path=None):
@@ -1256,6 +1319,27 @@ detector = SprocketDetector(
     method="profile"
 )
 
+raw_preview_scale = RAW_PREVIEW_SIZE[1] / float(CALIBRATION_RES[1])
+raw_area_scale = (
+    RAW_PREVIEW_SIZE[0] / float(CALIBRATION_RES[0])
+    * RAW_PREVIEW_SIZE[1] / float(CALIBRATION_RES[1])
+)
+raw_fast_detector = FastSprocketDetector(
+    reference_size=CALIBRATION_RES,
+    expected_pitch=SPROCKET_PITCH_PX,
+)
+raw_fallback_detector = SprocketDetector(
+    side="left", auto_roi=0.40,
+    min_area=max(500, int(round(12000 * raw_area_scale))),
+    max_area=max(5000, int(round(150000 * raw_area_scale))),
+    ar_min=1.1, ar_max=2.0,
+    solidity_min=0.65,
+    blur=5, open_k=5, close_k=3,
+    adaptive_block=41, adaptive_C=7,
+    method="profile",
+)
+raw_fallback_detector.expected_pitch = int(round(SPROCKET_PITCH_PX * raw_preview_scale))
+
 registration_tracker = RegistrationTracker(
     expected_sprocket_pitch_px=SPROCKET_PITCH_PX,
     max_jump_px=40.0,
@@ -1531,6 +1615,18 @@ def get_next_project_frame_number(frames_path):
     return max_frame_number + 1
 
 
+def get_next_raw_frame_number(raw_path):
+    frame_pattern = re.compile(r"^frame_(\d+)\.dng$")
+    max_frame_number = 0
+    if not os.path.exists(raw_path):
+        return 1
+    for entry in os.listdir(raw_path):
+        match = frame_pattern.match(entry)
+        if match:
+            max_frame_number = max(max_frame_number, int(match.group(1)))
+    return max_frame_number + 1
+
+
 def append_registration_metadata(metadata_path, payload):
     try:
         with open(metadata_path, 'a', encoding='utf-8') as handle:
@@ -1581,6 +1677,216 @@ def save_project_camera_settings(project_path=None):
     )
     print(f"[APP] Saved camera settings to {settings_path}")
     return settings_path
+
+
+async def run_raw_capture(websocket, num_frames, stop_event):
+    """Experimental archival DNG capture; existing transport policy is retained."""
+    if not active_project_path:
+        raise RuntimeError("No active project selected")
+
+    raw_path = os.path.join(active_project_path, "raw")
+    debug_path = os.path.join(active_project_path, "debug")
+    os.makedirs(raw_path, exist_ok=True)
+    os.makedirs(debug_path, exist_ok=True)
+    next_frame_number = get_next_raw_frame_number(raw_path)
+    metadata_path = os.path.join(
+        debug_path, f"raw_capture_metadata_{time.strftime('%Y%m%d-%H%M%S')}.jsonl"
+    )
+
+    configure_raw_camera()
+    applied_camera_settings = apply_capture_camera_controls()
+    raw_fast_detector.reset()
+    preview_pitch = SPROCKET_PITCH_PX * raw_preview_scale
+    raw_tracker = RegistrationTracker(
+        expected_sprocket_pitch_px=preview_pitch,
+        max_jump_px=40.0 * raw_preview_scale,
+        smoothing_alpha=0.8,
+    )
+
+    tc.light_on()
+    camera.start()
+    print("[APP] RAW capture: LED on + camera, stabilizing...")
+    try:
+        await asyncio.sleep(2)
+        nominal_steps_per_pitch = int(settings.get("steps_per_pitch", STEPS_PER_PITCH))
+        calibrated_steps_per_px = float(settings.get("steps_per_px", steps_per_px))
+        base_steps = nominal_steps_per_pitch
+        full_pixels_per_step = 1.0 / calibrated_steps_per_px if calibrated_steps_per_px > 0 else 9.0
+        pixels_per_step = full_pixels_per_step * raw_preview_scale
+        current_steps = base_steps
+        correction_gain = 0.4
+        max_correction = 6
+        dead_band_px = 10.0 * raw_preview_scale
+        min_steps = int(nominal_steps_per_pitch * 0.88)
+        max_steps = int(nominal_steps_per_pitch * 1.12)
+        target_y = RAW_PREVIEW_SIZE[1] / 2.0
+        missing_pair_count = 0
+        trusted_step_history = deque(maxlen=5)
+
+        for frame_index in range(1, int(num_frames) + 1):
+            if stop_event.is_set():
+                break
+            frame_started = time.perf_counter()
+            tc.steps_forward(current_steps)
+            await asyncio.sleep(0.05)
+
+            request = None
+            dng_future = None
+            try:
+                request = camera.capture_request()
+                preview_bgr = request.make_array("main")
+                camera_metadata = request.get_metadata() or {}
+                frame_number = next_frame_number + frame_index - 1
+                dng_path = os.path.join(raw_path, f"frame_{frame_number:06d}.dng")
+                pending_dng_path = os.path.join(raw_path, f"frame_{frame_number:06d}.partial.dng")
+                loop = asyncio.get_running_loop()
+                dng_started = time.perf_counter()
+                dng_future = loop.run_in_executor(None, request.save_dng, pending_dng_path)
+
+                detection_started = time.perf_counter()
+                sprockets = raw_fast_detector.detect(preview_bgr)
+                detection_method = "fast"
+                if not sprockets:
+                    sprockets = raw_fallback_detector.detect(preview_bgr, mode="profile") or []
+                    detection_method = "fallback" if sprockets else "failed"
+                detection_ms = (time.perf_counter() - detection_started) * 1000.0
+
+                classified = raw_fallback_detector.classify_sprockets(sprockets, preview_bgr.shape)
+                full_count = sum(1 for item in classified if item.get('status') == 'full')
+                partial_count = sum(1 for item in classified if item.get('status') == 'partial')
+                raw_registration = raw_fallback_detector.choose_registration(
+                    sprockets, preview_bgr.shape, expected_pitch=preview_pitch
+                )
+                raw_mode = raw_registration.get('mode', 'none') if raw_registration else 'none'
+                raw_y = raw_registration.get('actual_y') if raw_registration else None
+                tracked = raw_tracker.update(
+                    raw_registration_y=raw_y,
+                    raw_registration_mode=raw_mode,
+                    frame_index=frame_index,
+                    expected_sprocket_pitch_px=preview_pitch,
+                )
+                registration_y = tracked.get('stable_registration_y')
+                crop_rect, crop_meta = get_scaled_relative_crop_rect(preview_bgr, registration_y)
+
+                if raw_mode == 'pair':
+                    missing_pair_count = 0
+                else:
+                    missing_pair_count += 1
+
+                steps_before_update = current_steps
+                correction = 0
+                next_steps = max(min_steps, min(max_steps, base_steps))
+                if raw_y is not None:
+                    error_px = float(target_y) - float(raw_y)
+                    update_allowed = raw_mode == 'pair' and full_count == 2 and partial_count == 0
+                    if update_allowed:
+                        if abs(error_px) > dead_band_px:
+                            correction = int(round((error_px / pixels_per_step) * correction_gain))
+                            correction = max(-max_correction, min(max_correction, correction))
+                        next_steps = max(min_steps, min(max_steps, base_steps + correction))
+                        current_steps = next_steps
+                        trusted_step_history.append(int(current_steps))
+                    else:
+                        current_steps = next_steps
+                else:
+                    error_px = None
+                    current_steps = next_steps
+
+                if missing_pair_count >= 3:
+                    reacquire = await reacquire_pair_registration(
+                        camera, tc, raw_fallback_detector, target_y,
+                        step_size=10, max_steps=300,
+                    )
+                    current_steps = (
+                        int(round(float(np.median(np.array(trusted_step_history, dtype=float)))))
+                        if trusted_step_history else nominal_steps_per_pitch
+                    )
+                    if reacquire.get('valid'):
+                        missing_pair_count = 0
+
+                encode_started = time.perf_counter()
+                ok, encoded = cv2.imencode(
+                    '.jpg', preview_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 85]
+                )
+                if not ok:
+                    raise RuntimeError("Failed to encode RAW capture preview")
+                preview_bytes = encoded.tobytes()
+                encode_ms = (time.perf_counter() - encode_started) * 1000.0
+
+                await dng_future
+                os.replace(pending_dng_path, dng_path)
+                dng_ms = (time.perf_counter() - dng_started) * 1000.0
+                total_ms = (time.perf_counter() - frame_started) * 1000.0
+
+                frame_metadata = {
+                    'protocol': RAW_CAPTURE_MODE,
+                    'frame_index': frame_index,
+                    'frame_number': frame_number,
+                    'saved_frame_path': dng_path,
+                    'preview_width': int(preview_bgr.shape[1]),
+                    'preview_height': int(preview_bgr.shape[0]),
+                    'raw_width': RAW_SENSOR_SIZE[0],
+                    'raw_height': RAW_SENSOR_SIZE[1],
+                    'crop_rect': [int(value) for value in crop_rect],
+                    'orientation_degrees': 180,
+                    'detection_method': detection_method,
+                    'sprockets': [[float(value) for value in item] for item in sprockets],
+                    'raw_registration_mode': raw_mode,
+                    'raw_registration_y': float(raw_y) if raw_y is not None else None,
+                    'selected_registration_y': registration_y,
+                    'selected_source': tracked.get('selected_source'),
+                    'crop_clamped': bool(crop_meta.get('crop_clamped')),
+                    'steps': int(steps_before_update),
+                    'correction': int(correction),
+                    'next_steps': int(current_steps),
+                    'camera_exposure_time': int(camera_metadata.get('ExposureTime', applied_camera_settings.get('ExposureTime', EXPOSURE_TIME))),
+                    'camera_analogue_gain': float(camera_metadata.get('AnalogueGain', applied_camera_settings.get('AnalogueGain', GAIN))),
+                    'timing_detection_ms': round(detection_ms, 2),
+                    'timing_preview_encode_ms': round(encode_ms, 2),
+                    'timing_dng_ms': round(dng_ms, 2),
+                    'timing_total_ms': round(total_ms, 2),
+                }
+                append_registration_metadata(metadata_path, frame_metadata)
+
+                await websocket.send(json.dumps({
+                    'event': 'capture_preview_v1',
+                    'frame': frame_number,
+                    'frame_index': frame_index,
+                    'frame_total': int(num_frames),
+                    'binary_size': len(preview_bytes),
+                    'source_width': int(preview_bgr.shape[1]),
+                    'source_height': int(preview_bgr.shape[0]),
+                    'crop_rect': [int(value) for value in crop_rect],
+                    'orientation_degrees': 180,
+                    'detection_method': detection_method,
+                    'registration_source': tracked.get('selected_source'),
+                }))
+                await websocket.send(preview_bytes)
+                await websocket.send(json.dumps({
+                    'event': 'info',
+                    'message': f'RAW image {frame_index} of {num_frames}',
+                    'frame_index': frame_index,
+                    'frame_total': int(num_frames),
+                }))
+                print(
+                    f"[APP] RAW frame {frame_number}: {detection_method}, "
+                    f"detect={detection_ms:.1f}ms dng={dng_ms:.1f}ms total={total_ms:.1f}ms"
+                )
+            finally:
+                if dng_future is not None and not dng_future.done():
+                    try:
+                        await dng_future
+                    except Exception as exc:
+                        print(f"[APP] RAW DNG writer failed during cleanup: {exc}")
+                if request is not None:
+                    request.release()
+
+        await websocket.send(json.dumps({'event': 'capture_complete', 'capture_mode': RAW_CAPTURE_MODE}))
+    finally:
+        tc.clean_up()
+        camera.stop()
+        configure_legacy_camera()
+        print("[APP] RAW capture cleaned up; legacy camera configuration restored")
 
 async def run_capture(websocket, num_frames, stop_event, preview_width=800, debug_scale=1.0):
     print("[APP] Capture task starting")
@@ -2219,18 +2525,24 @@ async def handle_client(websocket):
                     }))
                     continue
                 num_frames = data.get('num_frames', 100)
+                capture_mode = data.get('capture_mode', 'legacy_png')
                 preview_width = data.get('preview_width', 800)
                 debug_scale = data.get('debug_scale', 1.0)
                 capture_stop_event = asyncio.Event()
-                capture_task = asyncio.create_task(
-                    run_capture(
-                        websocket,
-                        num_frames,
-                        capture_stop_event,
-                        preview_width=preview_width,
-                        debug_scale=debug_scale
+                if capture_mode == RAW_CAPTURE_MODE:
+                    capture_task = asyncio.create_task(
+                        run_raw_capture(websocket, num_frames, capture_stop_event)
                     )
-                )
+                else:
+                    capture_task = asyncio.create_task(
+                        run_capture(
+                            websocket,
+                            num_frames,
+                            capture_stop_event,
+                            preview_width=preview_width,
+                            debug_scale=debug_scale
+                        )
+                    )
                 continue
 
             elif event == 'stop_capture':
