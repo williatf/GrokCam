@@ -2019,10 +2019,24 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                 reacquire_steps = 0
                 reacquire_reason = None
                 reacquire_ms = 0.0
-                next_steps = max(min_steps, min(max_steps, int(round(adaptive_base_steps))))
+                # Hold the last commanded pitch unless a trusted full pair
+                # explicitly asks for a change. Returning to a separate base
+                # here caused a six-step jump immediately after reaching the
+                # target (257 -> 263 in the live trace).
+                next_steps = max(min_steps, min(max_steps, int(current_steps)))
                 if raw_y is not None:
                     error_px = float(target_y) - float(raw_y)
-                    update_allowed = raw_mode == 'pair' and full_count >= 2
+                    update_allowed = (
+                        raw_mode == 'pair'
+                        and full_count >= 2
+                        and partial_count == 0
+                        and 'registration_phase_jump' not in anomaly_reasons
+                        and (
+                            detector_disagreement_px is None
+                            or detector_disagreement_px <= 20.0
+                            or detection_method == 'fallback_validation'
+                        )
+                    )
                     if update_allowed:
                         if abs(error_px) > dead_band_px:
                             # The live trace shows that increasing motor steps
@@ -2031,24 +2045,16 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                             # a pair below target gets fewer steps next frame.
                             correction = int(round((error_px / pixels_per_step) * correction_gain))
                             correction = max(-max_correction, min(max_correction, correction))
-                            # Slowly learn a new nominal pitch rather than
-                            # applying the same proportional correction forever.
-                            adaptive_base_steps += max(-0.75, min(0.75, correction * 0.15))
-                            adaptive_base_steps = max(
-                                float(min_steps), min(float(max_steps), adaptive_base_steps)
-                            )
                         next_steps = max(
                             min_steps,
-                            min(max_steps, int(round(adaptive_base_steps + correction))),
+                            min(max_steps, int(current_steps + correction)),
                         )
                         current_steps = next_steps
+                        adaptive_base_steps = float(current_steps)
                         trusted_step_history.append(int(current_steps))
                         previous_trusted_pair_y = float(raw_y)
-                    else:
-                        current_steps = next_steps
                 else:
                     error_px = None
-                    current_steps = next_steps
 
                 if missing_pair_count >= 3:
                     reacquire_attempted = True
@@ -2066,6 +2072,7 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                         int(round(float(np.median(np.array(trusted_step_history, dtype=float)))))
                         if trusted_step_history else nominal_steps_per_pitch
                     )
+                    adaptive_base_steps = float(current_steps)
                     if reacquire.get('valid'):
                         missing_pair_count = 0
                         reacquired_y = reacquire.get('registration_y')
