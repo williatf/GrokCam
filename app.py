@@ -252,10 +252,14 @@ async def reacquire_pair_registration(camera, tc, detector, target_y, step_size=
 
         sprockets = detector.detect(frame_bgr, mode='profile') or []
         classified = detector.classify_sprockets(sprockets, frame_bgr.shape)
-        full_count = sum(1 for item in classified if item.get('status') == 'full')
+        full_sprockets = [
+            item['sprocket'] for item in classified
+            if item.get('status') == 'full'
+        ]
+        full_count = len(full_sprockets)
         partial_count = sum(1 for item in classified if item.get('status') == 'partial')
         registration_choice = detector.choose_registration(
-            sprockets,
+            full_sprockets,
             frame_bgr.shape,
             expected_pitch=detector.expected_pitch,
         )
@@ -1792,31 +1796,54 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                 crosscheck_sprockets = None
                 crosscheck_registration_y = None
                 detector_disagreement_px = None
+                crosscheck_mode = None
+                crosscheck_full_count = None
+                crosscheck_partial_count = None
                 if not sprockets:
                     sprockets = raw_fallback_detector.detect(preview_bgr, mode="profile") or []
                     detection_method = "fallback" if sprockets else "failed"
-                    if sprockets:
-                        raw_fast_detector.seed(sprockets, preview_bgr.shape)
                 elif frame_index % 25 == 0:
                     crosscheck_sprockets = raw_fallback_detector.detect(
                         preview_bgr, mode="profile"
                     ) or []
-                    crosscheck_choice = raw_fallback_detector.choose_registration(
-                        crosscheck_sprockets,
-                        preview_bgr.shape,
-                        expected_pitch=preview_pitch,
-                    ) or {}
-                    crosscheck_registration_y = crosscheck_choice.get('actual_y')
                 detection_ms = (time.perf_counter() - detection_started) * 1000.0
 
                 classified = raw_fallback_detector.classify_sprockets(sprockets, preview_bgr.shape)
-                full_count = sum(1 for item in classified if item.get('status') == 'full')
+                full_sprockets = [
+                    item['sprocket'] for item in classified
+                    if item.get('status') == 'full'
+                ]
+                full_count = len(full_sprockets)
                 partial_count = sum(1 for item in classified if item.get('status') == 'partial')
+                if detection_method == 'fallback' and full_sprockets:
+                    raw_fast_detector.seed(full_sprockets, preview_bgr.shape)
                 raw_registration = raw_fallback_detector.choose_registration(
-                    sprockets, preview_bgr.shape, expected_pitch=preview_pitch
+                    full_sprockets, preview_bgr.shape, expected_pitch=preview_pitch
                 )
                 raw_mode = raw_registration.get('mode', 'none') if raw_registration else 'none'
                 raw_y = raw_registration.get('actual_y') if raw_registration else None
+
+                if crosscheck_sprockets is not None:
+                    crosscheck_classified = raw_fallback_detector.classify_sprockets(
+                        crosscheck_sprockets, preview_bgr.shape
+                    )
+                    crosscheck_full_sprockets = [
+                        item['sprocket'] for item in crosscheck_classified
+                        if item.get('status') == 'full'
+                    ]
+                    crosscheck_full_count = len(crosscheck_full_sprockets)
+                    crosscheck_partial_count = sum(
+                        1 for item in crosscheck_classified
+                        if item.get('status') == 'partial'
+                    )
+                    crosscheck_choice = raw_fallback_detector.choose_registration(
+                        crosscheck_full_sprockets,
+                        preview_bgr.shape,
+                        expected_pitch=preview_pitch,
+                    ) or {}
+                    crosscheck_mode = crosscheck_choice.get('mode', 'none')
+                    if crosscheck_mode == 'pair':
+                        crosscheck_registration_y = crosscheck_choice.get('actual_y')
                 if raw_y is not None and crosscheck_registration_y is not None:
                     detector_disagreement_px = abs(
                         float(raw_y) - float(crosscheck_registration_y)
@@ -1847,6 +1874,11 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                 ):
                     anomaly_reasons.append('detector_disagreement')
                 if (
+                    crosscheck_sprockets is not None
+                    and crosscheck_mode != 'pair'
+                ):
+                    anomaly_reasons.append('fallback_crosscheck_untrusted')
+                if (
                     raw_mode == 'pair'
                     and raw_y is not None
                     and previous_trusted_pair_y is not None
@@ -1869,7 +1901,7 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                 next_steps = max(min_steps, min(max_steps, base_steps))
                 if raw_y is not None:
                     error_px = float(target_y) - float(raw_y)
-                    update_allowed = raw_mode == 'pair' and full_count == 2 and partial_count == 0
+                    update_allowed = raw_mode == 'pair' and full_count >= 2
                     if update_allowed:
                         if abs(error_px) > dead_band_px:
                             correction = int(round((error_px / pixels_per_step) * correction_gain))
@@ -1963,6 +1995,9 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                         float(crosscheck_registration_y)
                         if crosscheck_registration_y is not None else None
                     ),
+                    'crosscheck_mode': crosscheck_mode,
+                    'crosscheck_full_count': crosscheck_full_count,
+                    'crosscheck_partial_count': crosscheck_partial_count,
                     'detector_disagreement_px': (
                         float(detector_disagreement_px)
                         if detector_disagreement_px is not None else None
