@@ -681,6 +681,20 @@ def refresh_runtime_settings():
     detector.expected_pitch = int(SPROCKET_PITCH_PX)
     calibrator.settings = settings
 
+    # RAW registration works on a smaller preview stream, but its geometry is
+    # derived from this same full-resolution calibration. Keep both RAW
+    # detectors synchronized when calibration is saved without a restart.
+    if 'raw_fast_detector' in globals():
+        raw_fast_detector.reference_size = tuple(CALIBRATION_RES)
+        raw_fast_detector.expected_pitch = float(SPROCKET_PITCH_PX)
+        raw_fast_detector.reset()
+    if 'raw_fallback_detector' in globals():
+        preview_scale = RAW_PREVIEW_SIZE[1] / float(CALIBRATION_RES[1])
+        raw_fallback_detector.expected_pitch = int(round(SPROCKET_PITCH_PX * preview_scale))
+        raw_fallback_detector.dynamic_roi_bounds = None
+        raw_fallback_detector.dynamic_roi_misses = 0
+        raw_fallback_detector.dynamic_roi_candidates = []
+
     print("[APP] Runtime calibration settings refreshed")
     if previous_resolution is not None and tuple(previous_resolution) != CALIBRATION_RES:
         print("[APP] Calibration resolution changed; service restart recommended to reconfigure camera")
@@ -1793,7 +1807,7 @@ def save_project_camera_settings(project_path=None):
 
 
 async def run_raw_capture(websocket, num_frames, stop_event):
-    """Experimental archival DNG capture; existing transport policy is retained."""
+    """Capture archival DNG frames with live sprocket registration."""
     if not active_project_path:
         raise RuntimeError("No active project selected")
 
@@ -2893,7 +2907,9 @@ async def handle_client(websocket):
                     }))
                     continue
                 num_frames = data.get('num_frames', 100)
-                capture_mode = data.get('capture_mode', 'legacy_png')
+                # RAW is the archival default. Older clients can still request
+                # legacy_png explicitly for compatibility.
+                capture_mode = data.get('capture_mode', RAW_CAPTURE_MODE)
                 preview_width = data.get('preview_width', 800)
                 debug_scale = data.get('debug_scale', 1.0)
                 capture_stop_event = asyncio.Event()
