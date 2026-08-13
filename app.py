@@ -2025,11 +2025,11 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                     update_allowed = raw_mode == 'pair' and full_count >= 2
                     if update_allowed:
                         if abs(error_px) > dead_band_px:
-                            # Increasing motor steps moves the detected pair
-                            # upward in this camera orientation (lower Y), so
-                            # transport correction has the opposite sign of
-                            # the image-space error.
-                            correction = -int(round((error_px / pixels_per_step) * correction_gain))
+                            # The live trace shows that increasing motor steps
+                            # increases the detected pair's Y coordinate. Keep
+                            # motor correction aligned with target_y - actual_y:
+                            # a pair below target gets fewer steps next frame.
+                            correction = int(round((error_px / pixels_per_step) * correction_gain))
                             correction = max(-max_correction, min(max_correction, correction))
                             # Slowly learn a new nominal pitch rather than
                             # applying the same proportional correction forever.
