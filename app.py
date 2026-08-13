@@ -1735,7 +1735,10 @@ async def run_raw_capture(websocket, num_frames, stop_event):
             request = None
             dng_future = None
             try:
-                request = camera.capture_request()
+                # The camera streams continuously while the film advances.  Flush
+                # requests queued during transport so the DNG and UI preview come
+                # from a frame exposed after the film has stopped and settled.
+                request = camera.capture_request(flush=True)
                 preview_bgr = request.make_array("main")
                 camera_metadata = request.get_metadata() or {}
                 frame_number = next_frame_number + frame_index - 1
