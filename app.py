@@ -1840,10 +1840,13 @@ async def run_raw_capture(websocket, num_frames, stop_event):
         dead_band_px = 10.0 * raw_preview_scale
         min_steps = int(nominal_steps_per_pitch * 0.88)
         max_steps = int(nominal_steps_per_pitch * 1.12)
-        target_y = get_scaled_saved_registration_target(
-            np.empty((RAW_PREVIEW_SIZE[1], RAW_PREVIEW_SIZE[0], 3), dtype=np.uint8),
-            default_y=RAW_PREVIEW_SIZE[1] / 2.0,
-        )
+        # Crop calibration records the relationship between the picture crop
+        # and whichever sprocket pair happened to be visible at that moment.
+        # It is not a safe transport target: the saved value can put the upper
+        # hole at the preview boundary, where a few pixels of normal variation
+        # turn a pair into a partial/single detection. Keep transport centered;
+        # the crop remains registration-relative and follows the detected pair.
+        target_y = RAW_PREVIEW_SIZE[1] / 2.0
         print(
             f"[APP] RAW registration controller: target_y={target_y:.2f}, "
             f"nominal_steps={nominal_steps_per_pitch}, exposure={applied_camera_settings['ExposureTime']}"
