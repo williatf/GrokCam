@@ -2907,16 +2907,64 @@ async def handle_client(websocket):
                     print('[APP] LED on + camera for crop calibration preview')
                     await asyncio.sleep(0.5)
 
-                    buffer = io.BytesIO()
-                    camera.capture_file(buffer, format='jpeg')
-                    frame_bgr = cv2.imdecode(np.frombuffer(buffer.getvalue(), np.uint8), cv2.IMREAD_COLOR)
+                    crop_fast_detector = FastSprocketDetector(
+                        reference_size=CALIBRATION_RES,
+                        expected_pitch=SPROCKET_PITCH_PX,
+                    )
+                    frame_bgr = None
+                    sprockets = []
+                    registration_y = None
+                    registration_mode = 'none'
+                    detection_method = 'failed'
+                    full_count = 0
+                    partial_count = 0
+
+                    for attempt in range(1, 6):
+                        buffer = io.BytesIO()
+                        camera.capture_file(buffer, format='jpeg')
+                        candidate_frame = cv2.imdecode(
+                            np.frombuffer(buffer.getvalue(), np.uint8),
+                            cv2.IMREAD_COLOR,
+                        )
+                        if candidate_frame is None:
+                            await asyncio.sleep(0.05)
+                            continue
+
+                        frame_bgr = candidate_frame
+                        sprockets = crop_fast_detector.detect(frame_bgr) or []
+                        detection_method = 'fast'
+                        if not sprockets:
+                            sprockets = detector.detect(frame_bgr, mode='profile') or []
+                            detection_method = 'fallback' if sprockets else 'failed'
+
+                        classified = detector.classify_sprockets(sprockets, frame_bgr.shape)
+                        full_sprockets = [
+                            item['sprocket'] for item in classified
+                            if item.get('status') == 'full'
+                        ]
+                        full_count = len(full_sprockets)
+                        partial_count = sum(
+                            1 for item in classified
+                            if item.get('status') == 'partial'
+                        )
+                        registration_choice = detector.choose_registration(
+                            full_sprockets,
+                            frame_bgr.shape,
+                            expected_pitch=SPROCKET_PITCH_PX,
+                        ) or {}
+                        if registration_choice.get('mode') == 'pair':
+                            registration_y = registration_choice.get('actual_y')
+                            registration_mode = 'pair'
+                            break
+                        await asyncio.sleep(0.05)
+
                     if frame_bgr is None:
                         raise RuntimeError('Failed to decode crop calibration preview frame')
-
-                    sprockets = detector.detect(frame_bgr, mode='profile') or []
-                    raw_registration = get_capture_registration(frame_bgr, sprockets)
-                    registration_y = raw_registration.get('registration_y')
-                    registration_mode = raw_registration.get('mode', 'none')
+                    print(
+                        f"[APP] Crop preview registration: mode={registration_mode}, "
+                        f"method={detection_method}, full={full_count}, "
+                        f"partial={partial_count}, y={registration_y}"
+                    )
                     latest_crop_preview_pair_midpoint = registration_y if registration_mode == 'pair' else None
 
                     preview_frame = frame_bgr.copy()
@@ -2974,6 +3022,9 @@ async def handle_client(websocket):
                         'display_flipped_vertical': True,
                         'registration_y': registration_y,
                         'registration_mode': registration_mode,
+                        'detection_method': detection_method,
+                        'full_sprocket_count': full_count,
+                        'partial_sprocket_count': partial_count,
                         'existing_crop': existing_crop_preview_rect,
                         'existing_crop_definition': existing_crop,
                         'size': len(jpg_bytes)
