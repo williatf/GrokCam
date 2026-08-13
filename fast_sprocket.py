@@ -114,16 +114,18 @@ class FastSprocketDetector:
             x, y, width, height = cv2.boundingRect(contour)
             area = float(cv2.contourArea(contour))
             aspect = width / float(height) if height else 0.0
-            if not (180 * sx <= width <= 500 * sx and 120 * sy <= height <= 360 * sy):
+            if not (180 * sx <= width <= 500 * sx and 120 * sy <= height <= 400 * sy):
                 continue
             if not (1.05 <= aspect <= 2.2 and area >= 15000 * sx * sy):
                 continue
-            touches_edge = (
-                x <= 1 or y <= 1
-                or x + width >= gray.shape[1] - 1
-                or y + height >= gray.shape[0] - 1
+            # Horizontal escape means this is unlikely to be the isolated
+            # perforation. Vertical contact can be caused by a bright scene
+            # joining the hole above or below; pair pitch validation below
+            # still rejects partial frame-edge sprockets.
+            touches_horizontal_edge = (
+                x <= 1 or x + width >= gray.shape[1] - 1
             )
-            if touches_edge:
+            if touches_horizontal_edge:
                 continue
             fill = area / float(width * height)
             candidate_x = x1 + x + width / 2.0
