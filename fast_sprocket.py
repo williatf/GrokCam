@@ -9,14 +9,40 @@ class FastSprocketDetector:
         self.reference_size = tuple(reference_size)
         self.expected_pitch = float(expected_pitch)
         self.previous = None
+        self.last_failure = None
 
     def reset(self):
         self.previous = None
+        self.last_failure = None
+
+    def seed(self, sprockets, frame_shape):
+        """Seed tracking from the best fallback-detected pair."""
+        if not sprockets or len(sprockets) < 2:
+            return False
+        frame_h, frame_w = frame_shape[:2]
+        sx = frame_w / float(self.reference_size[0])
+        sy = frame_h / float(self.reference_size[1])
+        expected = self.expected_pitch * sy
+        candidates = []
+        for index, first in enumerate(sprockets):
+            for second in sprockets[index + 1:]:
+                upper, lower = sorted((first, second), key=lambda item: item[1])
+                pitch_error = abs((lower[1] - upper[1]) - expected)
+                x_error = abs(lower[0] - upper[0])
+                if pitch_error <= 120.0 * sy and x_error <= 120.0 * sx:
+                    candidates.append((pitch_error + x_error, [upper, lower]))
+        if not candidates:
+            return False
+        self.previous = min(candidates, key=lambda item: item[0])[1]
+        return True
 
     def detect(self, frame_bgr):
+        self.last_failure = None
         centers = self._predicted_centers(frame_bgr.shape)
         found = [self._detect_one(frame_bgr, center) for center in centers]
         if any(item is None for item in found):
+            missing = [str(index) for index, item in enumerate(found) if item is None]
+            self.last_failure = 'no_candidate_roi_' + '_'.join(missing)
             return None
         found.sort(key=lambda item: item[1])
 
@@ -25,8 +51,10 @@ class FastSprocketDetector:
         sy = frame_h / float(self.reference_size[1])
         separation = found[1][1] - found[0][1]
         if abs(separation - self.expected_pitch * sy) > 90.0 * sy:
+            self.last_failure = 'pitch_mismatch'
             return None
         if abs(found[1][0] - found[0][0]) > 90.0 * sx:
+            self.last_failure = 'x_mismatch'
             return None
 
         self.previous = found
@@ -57,7 +85,11 @@ class FastSprocketDetector:
 
         gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
         peak = float(np.percentile(gray, 99.5))
-        threshold = int(max(180, min(250, peak * 0.86)))
+        background = float(np.percentile(gray, 40.0))
+        # A fixed floor of 180 rejected bright cyan holes whose grayscale
+        # luminance can fall below 180.  Threshold relative to the local ROI
+        # while retaining conservative bounds for genuinely bright regions.
+        threshold = int(max(120, min(245, background + 0.58 * (peak - background))))
         _, mask = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)

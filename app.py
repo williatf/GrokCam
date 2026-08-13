@@ -1770,10 +1770,13 @@ async def run_raw_capture(websocket, num_frames, stop_event):
 
                 detection_started = time.perf_counter()
                 sprockets = raw_fast_detector.detect(preview_bgr)
+                fast_failure_reason = raw_fast_detector.last_failure
                 detection_method = "fast"
                 if not sprockets:
                     sprockets = raw_fallback_detector.detect(preview_bgr, mode="profile") or []
                     detection_method = "fallback" if sprockets else "failed"
+                    if sprockets:
+                        raw_fast_detector.seed(sprockets, preview_bgr.shape)
                 detection_ms = (time.perf_counter() - detection_started) * 1000.0
 
                 classified = raw_fallback_detector.classify_sprockets(sprockets, preview_bgr.shape)
@@ -1855,6 +1858,7 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                     'crop_rect': [int(value) for value in crop_rect],
                     'orientation_degrees': 180,
                     'detection_method': detection_method,
+                    'fast_failure_reason': fast_failure_reason,
                     'sprockets': [[float(value) for value in item] for item in sprockets],
                     'raw_registration_mode': raw_mode,
                     'raw_registration_y': float(raw_y) if raw_y is not None else None,
@@ -1885,6 +1889,7 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                     'crop_rect': [int(value) for value in crop_rect],
                     'orientation_degrees': 180,
                     'detection_method': detection_method,
+                    'fast_failure_reason': fast_failure_reason,
                     'registration_source': tracked.get('selected_source'),
                 }))
                 await websocket.send(preview_bytes)
