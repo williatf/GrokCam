@@ -2873,6 +2873,7 @@ async def handle_client(websocket):
                         cv2.line(preview_frame, (0, flipped_y), (preview_frame.shape[1] - 1, flipped_y), (0, 0, 255), 2)
 
                     existing_crop = settings.get('crop') if isinstance(settings.get('crop'), dict) else None
+                    existing_crop_preview_rect = None
                     if existing_crop is not None and registration_y is not None:
                         x1, y1, x2, y2 = get_relative_crop_rect(frame_bgr, registration_y)
                         flipped_y1 = int(frame_height - y2)
@@ -2883,6 +2884,15 @@ async def handle_client(websocket):
                     preview_frame = cv2.flip(preview_frame, 0)
 
                     preview_height = max(1, int(preview_frame.shape[0] * (preview_width / preview_frame.shape[1])))
+                    if existing_crop is not None and registration_y is not None:
+                        scale_x = preview_width / float(frame_bgr.shape[1])
+                        scale_y = preview_height / float(frame_bgr.shape[0])
+                        existing_crop_preview_rect = [
+                            float(x1) * scale_x,
+                            float(flipped_y1) * scale_y,
+                            float(x2) * scale_x,
+                            float(flipped_y2) * scale_y,
+                        ]
                     preview_frame = cv2.resize(
                         preview_frame,
                         (preview_width, preview_height),
@@ -2902,7 +2912,8 @@ async def handle_client(websocket):
                         'display_flipped_vertical': True,
                         'registration_y': registration_y,
                         'registration_mode': registration_mode,
-                        'existing_crop': existing_crop,
+                        'existing_crop': existing_crop_preview_rect,
+                        'existing_crop_definition': existing_crop,
                         'size': len(jpg_bytes)
                     }))
                     await websocket.send(jpg_bytes)
@@ -2989,7 +3000,12 @@ async def handle_client(websocket):
 
                     await websocket.send(json.dumps({
                         'event': 'crop_calibration_saved',
-                        'crop': crop_data
+                        'crop': crop_data,
+                        'rect': (
+                            [float(value) for value in preview_rect]
+                            if isinstance(preview_rect, list) and len(preview_rect) == 4
+                            else [int(x1), int(y1), int(x2), int(y2)]
+                        ),
                     }))
                 except Exception as exc:
                     print(f'[APP] Crop calibration save failed: {exc}')
