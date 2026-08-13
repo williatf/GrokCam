@@ -1691,9 +1691,14 @@ async def run_raw_capture(websocket, num_frames, stop_event):
     os.makedirs(raw_path, exist_ok=True)
     os.makedirs(debug_path, exist_ok=True)
     next_frame_number = get_next_raw_frame_number(raw_path)
+    capture_stamp = time.strftime('%Y%m%d-%H%M%S')
     metadata_path = os.path.join(
-        debug_path, f"raw_capture_metadata_{time.strftime('%Y%m%d-%H%M%S')}.jsonl"
+        debug_path, f"raw_capture_metadata_{capture_stamp}.jsonl"
     )
+    fast_diagnostic_path = os.path.join(
+        debug_path, f"raw_fast_failure_preview_{capture_stamp}.jpg"
+    )
+    fast_diagnostic_saved = False
 
     configure_raw_camera()
     applied_camera_settings = apply_capture_camera_controls()
@@ -1840,6 +1845,12 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                     raise RuntimeError("Failed to encode RAW capture preview")
                 preview_bytes = encoded.tobytes()
                 encode_ms = (time.perf_counter() - encode_started) * 1000.0
+
+                if detection_method != 'fast' and not fast_diagnostic_saved:
+                    with open(fast_diagnostic_path, 'wb') as handle:
+                        handle.write(preview_bytes)
+                    fast_diagnostic_saved = True
+                    print(f"[APP] Saved fast-detector diagnostic preview: {fast_diagnostic_path}")
 
                 await dng_future
                 os.replace(pending_dng_path, dng_path)
