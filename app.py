@@ -3274,11 +3274,22 @@ async def handle_client(websocket):
 
                 try:
                     print(f"[APP] Starting calibration sweep: samples={total_samples}, step_size={step_size}, debug_scale={debug_scale}")
+                    progress_total = total_samples + 7
+                    await websocket.send(json.dumps({
+                        'event': 'calibration_sweep_progress', 'phase': 'starting',
+                        'completed': 0, 'total': progress_total,
+                        'message': 'Starting camera and stabilizing light…'
+                    }))
                     tc.light_on()
                     camera.start()
                     print("[APP] LED on + camera, stabilizing for calibration sweep...")
                     await asyncio.sleep(0.5)
                     exposure_result = await prepare_calibration_camera_settings(detector)
+                    await websocket.send(json.dumps({
+                        'event': 'calibration_sweep_progress', 'phase': 'seeking',
+                        'completed': 1, 'total': progress_total,
+                        'message': 'Exposure set; finding two complete sprockets…'
+                    }))
                     seek_result = await seek_two_full_sprockets(
                         camera,
                         tc,
@@ -3314,6 +3325,11 @@ async def handle_client(websocket):
                             'size': len(jpg_bytes)
                         }))
                         await websocket.send(jpg_bytes)
+                        await websocket.send(json.dumps({
+                            'event': 'calibration_sweep_progress', 'phase': 'samples',
+                            'completed': sample_index + 2, 'total': progress_total,
+                            'message': f'Measured sprocket sample {sample_index + 1} of {total_samples}'
+                        }))
                         print(
                             f"[APP] Calibration sweep sample {sample_index + 1}/{total_samples}: "
                             f"pitch={sample_measurement.get('sprocket_pitch_px')} "
@@ -3332,6 +3348,12 @@ async def handle_client(websocket):
 
                     motor_total_runs = 5
                     for motor_run_index in range(motor_total_runs):
+                        await websocket.send(json.dumps({
+                            'event': 'calibration_sweep_progress', 'phase': 'motor',
+                            'completed': total_samples + 2 + motor_run_index,
+                            'total': progress_total,
+                            'message': f'Measuring transport run {motor_run_index + 1} of {motor_total_runs}…'
+                        }))
                         motor_result = await measure_steps_per_pitch_live(
                             camera,
                             tc,
