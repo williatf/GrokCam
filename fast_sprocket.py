@@ -127,6 +127,13 @@ class FastSprocketDetector:
             )
             if touches_horizontal_edge:
                 continue
+            # A clipped picture highlight can merge with the perforation and
+            # fill this small tracking ROI vertically. Such a result repeats
+            # at the predicted coordinates and looks falsely stable, so defer
+            # ambiguous cases to the full-frame fallback detector.
+            fills_vertical_roi = y <= 1 and y + height >= gray.shape[0] - 1
+            if fills_vertical_roi:
+                continue
             fill = area / float(width * height)
             candidate_x = x1 + x + width / 2.0
             candidate_y = y1 + y + height / 2.0

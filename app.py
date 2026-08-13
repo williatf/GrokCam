@@ -22,6 +22,7 @@ from collections import deque
 RAW_CAPTURE_MODE = 'raw_dng_v1'
 RAW_SENSOR_SIZE = (2028, 1520)
 RAW_PREVIEW_SIZE = (760, 570)
+RAW_SAFE_DEFAULT_EXPOSURE_TIME = 1114
 
 async def troubleshoot_sprocket_detection(camera, websocket, tc, detector,
                                           step_size=None, delay=0.05):
@@ -449,6 +450,25 @@ def get_scaled_relative_crop_rect(frame_bgr, registration_y, source_size=None):
     }
 
 
+def get_scaled_saved_registration_target(frame_bgr, default_y=None):
+    """Scale the project crop-calibration registration point to this stream."""
+    frame_h, frame_w = frame_bgr.shape[:2]
+    crop_settings = get_effective_crop_settings()
+    if isinstance(crop_settings, dict):
+        saved_y = crop_settings.get('registration_y')
+        source_size = crop_settings.get('source_resolution')
+        try:
+            source_h = float(source_size[1])
+            if saved_y is not None and source_h > 0:
+                return float(saved_y) * frame_h / source_h
+        except (TypeError, ValueError, IndexError):
+            pass
+
+    if calibrated_baseline_registration_y is not None and CALIBRATION_RES[1] > 0:
+        return float(calibrated_baseline_registration_y) * frame_h / float(CALIBRATION_RES[1])
+    return float(default_y) if default_y is not None else frame_h / 2.0
+
+
 def save_crop_settings(rect, registration_y, frame_size):
     frame_w, frame_h = frame_size
     x1, y1, x2, y2 = rect
@@ -458,6 +478,7 @@ def save_crop_settings(rect, registration_y, frame_size):
         'x2': int(x2),
         'y_offset': float(y1 - registration_y),
         'height': int(y2 - y1),
+        'registration_y': float(registration_y),
         'source_resolution': [int(frame_w), int(frame_h)],
     }
 
@@ -942,6 +963,25 @@ def apply_project_capture_camera_settings(project_path=None, prefer_saved=True):
 def apply_capture_camera_controls():
     print("[APP] Switching camera to capture controls")
     return apply_project_capture_camera_settings(active_project_path, prefer_saved=True)
+
+
+def apply_raw_capture_camera_controls():
+    """Use saved project controls, with a conservative RAW-only fallback."""
+    if has_project_manual_camera_settings(active_project_path):
+        return apply_project_capture_camera_settings(active_project_path, prefer_saved=True)
+
+    safe_exposure = int(settings.get(
+        'raw_exposure_time',
+        min(int(EXPOSURE_TIME), RAW_SAFE_DEFAULT_EXPOSURE_TIME),
+    ))
+    return apply_manual_camera_settings(
+        safe_exposure,
+        1.0,
+        source='raw_safe_default',
+        saved=False,
+        project_path=active_project_path,
+        colour_gains=current_camera_settings.get('ColourGains'),
+    )
 
 
 def apply_focus_camera_controls():
@@ -1620,7 +1660,14 @@ def create_or_select_project(project_name):
 
     set_active_project(metadata["project_name"], safe_name, project_path)
     latest_crop_preview_pair_midpoint = None
-    calibrated_baseline_registration_y = None
+    project_crop = metadata.get('crop')
+    saved_registration_y = (
+        project_crop.get('registration_y')
+        if isinstance(project_crop, dict) else None
+    )
+    calibrated_baseline_registration_y = (
+        float(saved_registration_y) if saved_registration_y is not None else None
+    )
     initialize_project_camera_settings(project_path, apply=False)
     reset_registration_tracking("project_selected")
     return {
@@ -1767,7 +1814,7 @@ async def run_raw_capture(websocket, num_frames, stop_event):
     os.makedirs(anomaly_path, exist_ok=True)
 
     configure_raw_camera()
-    applied_camera_settings = apply_capture_camera_controls()
+    applied_camera_settings = apply_raw_capture_camera_controls()
     raw_fast_detector.reset()
     preview_pitch = SPROCKET_PITCH_PX * raw_preview_scale
     raw_tracker = RegistrationTracker(
@@ -1784,6 +1831,7 @@ async def run_raw_capture(websocket, num_frames, stop_event):
         nominal_steps_per_pitch = int(settings.get("steps_per_pitch", STEPS_PER_PITCH))
         calibrated_steps_per_px = float(settings.get("steps_per_px", steps_per_px))
         base_steps = nominal_steps_per_pitch
+        adaptive_base_steps = float(base_steps)
         full_pixels_per_step = 1.0 / calibrated_steps_per_px if calibrated_steps_per_px > 0 else 9.0
         pixels_per_step = full_pixels_per_step * raw_preview_scale
         current_steps = base_steps
@@ -1792,7 +1840,14 @@ async def run_raw_capture(websocket, num_frames, stop_event):
         dead_band_px = 10.0 * raw_preview_scale
         min_steps = int(nominal_steps_per_pitch * 0.88)
         max_steps = int(nominal_steps_per_pitch * 1.12)
-        target_y = RAW_PREVIEW_SIZE[1] / 2.0
+        target_y = get_scaled_saved_registration_target(
+            np.empty((RAW_PREVIEW_SIZE[1], RAW_PREVIEW_SIZE[0], 3), dtype=np.uint8),
+            default_y=RAW_PREVIEW_SIZE[1] / 2.0,
+        )
+        print(
+            f"[APP] RAW registration controller: target_y={target_y:.2f}, "
+            f"nominal_steps={nominal_steps_per_pitch}, exposure={applied_camera_settings['ExposureTime']}"
+        )
         missing_pair_count = 0
         trusted_step_history = deque(maxlen=5)
         previous_trusted_pair_y = None
@@ -1834,6 +1889,10 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                 if request is None:
                     raise RuntimeError("Unable to acquire a post-transport camera request")
                 preview_bgr = request.make_array("main")
+                preview_clip_pct = float(
+                    np.count_nonzero(np.max(preview_bgr, axis=2) >= 250)
+                    / (preview_bgr.shape[0] * preview_bgr.shape[1]) * 100.0
+                )
                 frame_number = next_frame_number + frame_index - 1
                 dng_path = os.path.join(raw_path, f"frame_{frame_number:06d}.dng")
                 pending_dng_path = os.path.join(raw_path, f"frame_{frame_number:06d}.partial.dng")
@@ -1855,7 +1914,7 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                 if not sprockets:
                     sprockets = raw_fallback_detector.detect(preview_bgr, mode="profile") or []
                     detection_method = "fallback" if sprockets else "failed"
-                elif frame_index % 25 == 0:
+                elif frame_index % 25 == 0 or preview_clip_pct >= 15.0:
                     crosscheck_sprockets = raw_fallback_detector.detect(
                         preview_bgr, mode="profile"
                     ) or []
@@ -1901,6 +1960,15 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                     detector_disagreement_px = abs(
                         float(raw_y) - float(crosscheck_registration_y)
                     )
+                    if detector_disagreement_px > 20.0 and crosscheck_mode == 'pair':
+                        sprockets = crosscheck_full_sprockets
+                        full_sprockets = crosscheck_full_sprockets
+                        full_count = len(full_sprockets)
+                        partial_count = int(crosscheck_partial_count or 0)
+                        raw_mode = 'pair'
+                        raw_y = float(crosscheck_registration_y)
+                        detection_method = 'fallback_validation'
+                        raw_fast_detector.seed(full_sprockets, preview_bgr.shape)
                 tracked = raw_tracker.update(
                     raw_registration_y=raw_y,
                     raw_registration_mode=raw_mode,
@@ -1951,15 +2019,28 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                 reacquire_steps = 0
                 reacquire_reason = None
                 reacquire_ms = 0.0
-                next_steps = max(min_steps, min(max_steps, base_steps))
+                next_steps = max(min_steps, min(max_steps, int(round(adaptive_base_steps))))
                 if raw_y is not None:
                     error_px = float(target_y) - float(raw_y)
                     update_allowed = raw_mode == 'pair' and full_count >= 2
                     if update_allowed:
                         if abs(error_px) > dead_band_px:
-                            correction = int(round((error_px / pixels_per_step) * correction_gain))
+                            # Increasing motor steps moves the detected pair
+                            # upward in this camera orientation (lower Y), so
+                            # transport correction has the opposite sign of
+                            # the image-space error.
+                            correction = -int(round((error_px / pixels_per_step) * correction_gain))
                             correction = max(-max_correction, min(max_correction, correction))
-                        next_steps = max(min_steps, min(max_steps, base_steps + correction))
+                            # Slowly learn a new nominal pitch rather than
+                            # applying the same proportional correction forever.
+                            adaptive_base_steps += max(-0.75, min(0.75, correction * 0.15))
+                            adaptive_base_steps = max(
+                                float(min_steps), min(float(max_steps), adaptive_base_steps)
+                            )
+                        next_steps = max(
+                            min_steps,
+                            min(max_steps, int(round(adaptive_base_steps + correction))),
+                        )
                         current_steps = next_steps
                         trusted_step_history.append(int(current_steps))
                         previous_trusted_pair_y = float(raw_y)
@@ -2062,6 +2143,9 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                     'selected_source': tracked.get('selected_source'),
                     'crop_clamped': bool(crop_meta.get('crop_clamped')),
                     'steps': int(steps_before_update),
+                    'target_y': float(target_y),
+                    'registration_error_px': float(error_px) if error_px is not None else None,
+                    'adaptive_base_steps': round(float(adaptive_base_steps), 3),
                     'correction': int(correction),
                     'next_steps': int(current_steps),
                     'reacquire_attempted': reacquire_attempted,
@@ -2073,6 +2157,7 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                     'anomaly_preview_path': anomaly_preview_path,
                     'camera_exposure_time': int(camera_metadata.get('ExposureTime', applied_camera_settings.get('ExposureTime', EXPOSURE_TIME))),
                     'camera_analogue_gain': float(camera_metadata.get('AnalogueGain', applied_camera_settings.get('AnalogueGain', GAIN))),
+                    'preview_clip_pct': round(preview_clip_pct, 3),
                     'timing_detection_ms': round(detection_ms, 2),
                     'timing_preview_encode_ms': round(encode_ms, 2),
                     'timing_dng_write_ms': round(dng_write_ms, 2),
@@ -2104,8 +2189,15 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                     'frame_index': frame_index,
                     'frame_total': int(num_frames),
                 }))
+                registration_log = (
+                    f"reg={raw_y:.1f} target={target_y:.1f} err={error_px:+.1f}"
+                    if raw_y is not None and error_px is not None else
+                    f"reg=n/a target={target_y:.1f} err=n/a"
+                )
                 print(
-                    f"[APP] RAW frame {frame_number}: {detection_method}, "
+                    f"[APP] RAW frame {frame_number}: {detection_method}, {registration_log} "
+                    f"steps={steps_before_update} "
+                    f"base={adaptive_base_steps:.2f} correction={correction:+d} next={current_steps}; "
                     f"discarded={discarded_requests} detect={detection_ms:.1f}ms "
                     f"dng_write={dng_write_ms:.1f}ms reacquire={reacquire_ms:.1f}ms "
                     f"total={total_ms:.1f}ms anomalies={','.join(anomaly_reasons) or 'none'}"
