@@ -368,9 +368,11 @@ def crop_frame_relative_to_registration(frame_bgr, registration_y):
     return frame_bgr[y1:y2, x1:x2]
 
 
-def get_scaled_relative_crop_rect(frame_bgr, registration_y, source_size=CALIBRATION_RES):
+def get_scaled_relative_crop_rect(frame_bgr, registration_y, source_size=None):
     """Apply the calibrated full-resolution crop to a smaller preview stream."""
     frame_h, frame_w = frame_bgr.shape[:2]
+    if source_size is None:
+        source_size = CALIBRATION_RES
     source_w, source_h = source_size
     crop_settings = settings.get('crop')
     if not isinstance(crop_settings, dict) or registration_y is None:
