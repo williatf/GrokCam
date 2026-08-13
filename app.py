@@ -2922,8 +2922,15 @@ async def handle_client(websocket):
                     preview_frame = frame_bgr.copy()
                     frame_height = preview_frame.shape[0]
                     if registration_y is not None:
-                        flipped_y = int(round(frame_height - registration_y))
-                        cv2.line(preview_frame, (0, flipped_y), (preview_frame.shape[1] - 1, flipped_y), (0, 0, 255), 2)
+                        # Draw in raw coordinates. The whole preview is flipped
+                        # below, which moves this annotation into display space.
+                        cv2.line(
+                            preview_frame,
+                            (0, int(round(registration_y))),
+                            (preview_frame.shape[1] - 1, int(round(registration_y))),
+                            (0, 0, 255),
+                            2,
+                        )
 
                     existing_crop = get_effective_crop_settings()
                     existing_crop_preview_rect = None
@@ -2931,7 +2938,9 @@ async def handle_client(websocket):
                         x1, y1, x2, y2 = get_relative_crop_rect(frame_bgr, registration_y)
                         flipped_y1 = int(frame_height - y2)
                         flipped_y2 = int(frame_height - y1)
-                        cv2.rectangle(preview_frame, (x1, flipped_y1), (x2, flipped_y2), (255, 255, 0), 2)
+                        # As with the registration line, draw once in raw space;
+                        # cv2.flip below performs the only vertical transform.
+                        cv2.rectangle(preview_frame, (x1, y1), (x2, y2), (255, 255, 0), 2)
 
                     # Preview is vertically flipped to match capture output; coordinates remain in original frame space
                     preview_frame = cv2.flip(preview_frame, 0)
