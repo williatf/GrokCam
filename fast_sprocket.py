@@ -92,6 +92,21 @@ class FastSprocketDetector:
         threshold = int(max(120, min(245, background + 0.58 * (peak - background))))
         _, mask = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+
+        # In reversal film the illuminated perforation can merge with a bright
+        # picture highlight at the film-side (right) edge.  Cut the mask just
+        # beyond the expected perforation edge so that connection cannot turn
+        # the hole and picture into one oversized contour.  The fallback
+        # detector remains responsible for unusual geometry.
+        expected_width = 400.0 * sx
+        local_center_x = center_x - x1
+        left_gate_x = int(round(local_center_x - 0.54 * expected_width))
+        right_gate_x = int(round(local_center_x + 0.54 * expected_width))
+        left_gate_x = max(0, min(mask.shape[1] - 1, left_gate_x))
+        right_gate_x = max(left_gate_x + 1, min(mask.shape[1], right_gate_x))
+        mask[:, :left_gate_x] = 0
+        mask[:, right_gate_x:] = 0
+
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         candidates = []
