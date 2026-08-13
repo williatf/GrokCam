@@ -1614,7 +1614,7 @@ def create_or_select_project(project_name):
         if isinstance(default_crop, dict):
             metadata['crop'] = dict(default_crop)
             metadata['crop_source'] = 'global_default'
-            metadata['crop_updated_timestamp'] = created_timestamp
+            metadata['crop_updated_timestamp'] = time.strftime("%Y-%m-%dT%H:%M:%S")
 
     save_project_metadata(metadata, project_path)
 
