@@ -1731,16 +1731,36 @@ async def run_raw_capture(websocket, num_frames, stop_event):
             frame_started = time.perf_counter()
             tc.steps_forward(current_steps)
             await asyncio.sleep(0.05)
+            fresh_after_ns = time.monotonic_ns()
 
             request = None
             dng_future = None
             try:
-                # The camera streams continuously while the film advances.  Flush
-                # requests queued during transport so the DNG and UI preview come
-                # from a frame exposed after the film has stopped and settled.
-                request = camera.capture_request(flush=True)
+                # Picamera2 0.3 on this Pi has no capture_request(flush=...).
+                # Discard completed requests whose sensor timestamp predates the
+                # end of the post-transport settling interval.
+                discarded_requests = 0
+                for attempt in range(7):
+                    candidate = camera.capture_request()
+                    candidate_metadata = candidate.get_metadata() or {}
+                    sensor_timestamp = candidate_metadata.get('SensorTimestamp')
+                    timestamp_is_fresh = (
+                        sensor_timestamp is not None
+                        and int(sensor_timestamp) >= fresh_after_ns
+                    )
+                    timestamp_unavailable_but_drained = (
+                        sensor_timestamp is None and attempt >= 2
+                    )
+                    if timestamp_is_fresh or timestamp_unavailable_but_drained or attempt == 6:
+                        request = candidate
+                        camera_metadata = candidate_metadata
+                        break
+                    candidate.release()
+                    discarded_requests += 1
+
+                if request is None:
+                    raise RuntimeError("Unable to acquire a post-transport camera request")
                 preview_bgr = request.make_array("main")
-                camera_metadata = request.get_metadata() or {}
                 frame_number = next_frame_number + frame_index - 1
                 dng_path = os.path.join(raw_path, f"frame_{frame_number:06d}.dng")
                 pending_dng_path = os.path.join(raw_path, f"frame_{frame_number:06d}.partial.dng")
@@ -1850,6 +1870,7 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                     'timing_preview_encode_ms': round(encode_ms, 2),
                     'timing_dng_ms': round(dng_ms, 2),
                     'timing_total_ms': round(total_ms, 2),
+                    'discarded_stale_requests': int(discarded_requests),
                 }
                 append_registration_metadata(metadata_path, frame_metadata)
 
@@ -1875,7 +1896,8 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                 }))
                 print(
                     f"[APP] RAW frame {frame_number}: {detection_method}, "
-                    f"detect={detection_ms:.1f}ms dng={dng_ms:.1f}ms total={total_ms:.1f}ms"
+                    f"discarded={discarded_requests} detect={detection_ms:.1f}ms "
+                    f"dng={dng_ms:.1f}ms total={total_ms:.1f}ms"
                 )
             finally:
                 if dng_future is not None and not dng_future.done():
@@ -2246,6 +2268,22 @@ async def run_focus(websocket, stop_event, preview_width=800, fps=5):
 async def run_camera_calibration_preview(websocket, stop_event, preview_width=800, fps=5):
     return await run_preview_stream(websocket, stop_event, preview_width=preview_width, fps=fps, mode='camera_calibration')
 
+
+async def run_capture_with_error_reporting(websocket, capture_coroutine):
+    """Ensure background capture failures immediately release the GUI state."""
+    try:
+        await capture_coroutine
+    except Exception as exc:
+        print(f"[APP] Capture task error: {exc}")
+        try:
+            await websocket.send(json.dumps({
+                'event': 'error',
+                'message': f'Capture failed: {exc}',
+            }))
+        except (ConnectionClosedError, ConnectionClosedOK):
+            pass
+
+
 async def handle_client(websocket):
     print("Client connected")
     capture_task = None
@@ -2536,16 +2574,22 @@ async def handle_client(websocket):
                 capture_stop_event = asyncio.Event()
                 if capture_mode == RAW_CAPTURE_MODE:
                     capture_task = asyncio.create_task(
-                        run_raw_capture(websocket, num_frames, capture_stop_event)
+                        run_capture_with_error_reporting(
+                            websocket,
+                            run_raw_capture(websocket, num_frames, capture_stop_event),
+                        )
                     )
                 else:
                     capture_task = asyncio.create_task(
-                        run_capture(
+                        run_capture_with_error_reporting(
                             websocket,
-                            num_frames,
-                            capture_stop_event,
-                            preview_width=preview_width,
-                            debug_scale=debug_scale
+                            run_capture(
+                                websocket,
+                                num_frames,
+                                capture_stop_event,
+                                preview_width=preview_width,
+                                debug_scale=debug_scale
+                            ),
                         )
                     )
                 continue
