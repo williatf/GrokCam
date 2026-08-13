@@ -305,9 +305,47 @@ async def reacquire_pair_registration(camera, tc, detector, target_y, step_size=
     }
 
 
+def get_project_metadata_path(project_path=None):
+    target_path = project_path or active_project_path
+    return os.path.join(target_path, 'metadata.json') if target_path else None
+
+
+def load_project_metadata(project_path=None):
+    metadata_path = get_project_metadata_path(project_path)
+    if not metadata_path or not os.path.exists(metadata_path):
+        return {}
+    try:
+        with open(metadata_path, 'r', encoding='utf-8') as handle:
+            payload = json.load(handle)
+        return payload if isinstance(payload, dict) else {}
+    except Exception as exc:
+        print(f"[APP] Project metadata read failed: {exc}")
+        return {}
+
+
+def save_project_metadata(payload, project_path=None):
+    metadata_path = get_project_metadata_path(project_path)
+    if not metadata_path:
+        raise RuntimeError('No active project selected')
+    temporary_path = f"{metadata_path}.partial"
+    with open(temporary_path, 'w', encoding='utf-8') as handle:
+        json.dump(payload, handle, indent=2)
+        handle.write('\n')
+    os.replace(temporary_path, metadata_path)
+
+
+def get_effective_crop_settings(project_path=None):
+    project_metadata = load_project_metadata(project_path)
+    project_crop = project_metadata.get('crop')
+    if isinstance(project_crop, dict):
+        return project_crop
+    global_crop = settings.get('crop')
+    return global_crop if isinstance(global_crop, dict) else None
+
+
 def get_relative_crop_rect(frame_bgr, registration_y, return_metadata=False):
     frame_h, frame_w = frame_bgr.shape[:2]
-    crop_settings = settings.get('crop')
+    crop_settings = get_effective_crop_settings()
     crop_meta = {
         'crop_y1': 0,
         'crop_y2': int(frame_h),
@@ -378,7 +416,7 @@ def get_scaled_relative_crop_rect(frame_bgr, registration_y, source_size=None):
     if source_size is None:
         source_size = CALIBRATION_RES
     source_w, source_h = source_size
-    crop_settings = settings.get('crop')
+    crop_settings = get_effective_crop_settings()
     if not isinstance(crop_settings, dict) or registration_y is None:
         return (0, 0, frame_w, frame_h), {'crop_clamped': False}
 
@@ -430,10 +468,18 @@ def save_crop_settings(rect, registration_y, frame_size):
             config_data = json.load(handle)
 
     config_data['crop'] = crop_data
+    config_data['crop_updated_timestamp'] = time.strftime("%Y-%m-%dT%H:%M:%S")
 
     with open(config_path, 'w', encoding='utf-8') as handle:
         json.dump(config_data, handle, indent=2)
         handle.write('\n')
+
+    if active_project_path:
+        project_metadata = load_project_metadata(active_project_path)
+        project_metadata['crop'] = dict(crop_data)
+        project_metadata['crop_source'] = 'project_saved'
+        project_metadata['crop_updated_timestamp'] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        save_project_metadata(project_metadata, active_project_path)
 
     return crop_data
 
@@ -1545,6 +1591,7 @@ def create_or_select_project(project_name):
     os.makedirs(debug_path, exist_ok=True)
 
     created_timestamp = time.strftime("%Y-%m-%dT%H:%M:%S")
+    existing_metadata = {}
     if os.path.exists(metadata_path):
         try:
             with open(metadata_path, "r", encoding="utf-8") as handle:
@@ -1554,6 +1601,7 @@ def create_or_select_project(project_name):
             pass
 
     metadata = {
+        **existing_metadata,
         "project_name": str(project_name).strip(),
         "safe_folder_name": safe_name,
         "created_timestamp": created_timestamp,
@@ -1561,9 +1609,14 @@ def create_or_select_project(project_name):
         "project_path": project_path,
     }
 
-    with open(metadata_path, "w", encoding="utf-8") as handle:
-        json.dump(metadata, handle, indent=2)
-        handle.write("\n")
+    if not isinstance(metadata.get('crop'), dict):
+        default_crop = settings.get('crop')
+        if isinstance(default_crop, dict):
+            metadata['crop'] = dict(default_crop)
+            metadata['crop_source'] = 'global_default'
+            metadata['crop_updated_timestamp'] = created_timestamp
+
+    save_project_metadata(metadata, project_path)
 
     set_active_project(metadata["project_name"], safe_name, project_path)
     latest_crop_preview_pair_midpoint = None
@@ -2872,7 +2925,7 @@ async def handle_client(websocket):
                         flipped_y = int(round(frame_height - registration_y))
                         cv2.line(preview_frame, (0, flipped_y), (preview_frame.shape[1] - 1, flipped_y), (0, 0, 255), 2)
 
-                    existing_crop = settings.get('crop') if isinstance(settings.get('crop'), dict) else None
+                    existing_crop = get_effective_crop_settings()
                     existing_crop_preview_rect = None
                     if existing_crop is not None and registration_y is not None:
                         x1, y1, x2, y2 = get_relative_crop_rect(frame_bgr, registration_y)
