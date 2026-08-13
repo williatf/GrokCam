@@ -1638,6 +1638,13 @@ def append_registration_metadata(metadata_path, payload):
         print(f"[APP] Registration metadata write failed: {exc}")
 
 
+def save_dng_with_timing(request, output_path):
+    """Save a DNG in a worker thread and return actual writer elapsed time."""
+    started = time.perf_counter()
+    request.save_dng(output_path)
+    return (time.perf_counter() - started) * 1000.0
+
+
 def get_active_camera_settings_state():
     if active_project_path and current_camera_settings.get('project_path') != active_project_path:
         initialize_project_camera_settings(active_project_path, apply=False)
@@ -1699,6 +1706,8 @@ async def run_raw_capture(websocket, num_frames, stop_event):
         debug_path, f"raw_fast_failure_preview_{capture_stamp}.jpg"
     )
     fast_diagnostic_saved = False
+    anomaly_path = os.path.join(debug_path, f"raw_anomalies_{capture_stamp}")
+    os.makedirs(anomaly_path, exist_ok=True)
 
     configure_raw_camera()
     applied_camera_settings = apply_capture_camera_controls()
@@ -1729,6 +1738,8 @@ async def run_raw_capture(websocket, num_frames, stop_event):
         target_y = RAW_PREVIEW_SIZE[1] / 2.0
         missing_pair_count = 0
         trusted_step_history = deque(maxlen=5)
+        previous_trusted_pair_y = None
+        anomaly_count = 0
 
         for frame_index in range(1, int(num_frames) + 1):
             if stop_event.is_set():
@@ -1770,18 +1781,32 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                 dng_path = os.path.join(raw_path, f"frame_{frame_number:06d}.dng")
                 pending_dng_path = os.path.join(raw_path, f"frame_{frame_number:06d}.partial.dng")
                 loop = asyncio.get_running_loop()
-                dng_started = time.perf_counter()
-                dng_future = loop.run_in_executor(None, request.save_dng, pending_dng_path)
+                dng_future = loop.run_in_executor(
+                    None, save_dng_with_timing, request, pending_dng_path
+                )
 
                 detection_started = time.perf_counter()
                 sprockets = raw_fast_detector.detect(preview_bgr)
                 fast_failure_reason = raw_fast_detector.last_failure
                 detection_method = "fast"
+                crosscheck_sprockets = None
+                crosscheck_registration_y = None
+                detector_disagreement_px = None
                 if not sprockets:
                     sprockets = raw_fallback_detector.detect(preview_bgr, mode="profile") or []
                     detection_method = "fallback" if sprockets else "failed"
                     if sprockets:
                         raw_fast_detector.seed(sprockets, preview_bgr.shape)
+                elif frame_index % 25 == 0:
+                    crosscheck_sprockets = raw_fallback_detector.detect(
+                        preview_bgr, mode="profile"
+                    ) or []
+                    crosscheck_choice = raw_fallback_detector.choose_registration(
+                        crosscheck_sprockets,
+                        preview_bgr.shape,
+                        expected_pitch=preview_pitch,
+                    ) or {}
+                    crosscheck_registration_y = crosscheck_choice.get('actual_y')
                 detection_ms = (time.perf_counter() - detection_started) * 1000.0
 
                 classified = raw_fallback_detector.classify_sprockets(sprockets, preview_bgr.shape)
@@ -1792,6 +1817,10 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                 )
                 raw_mode = raw_registration.get('mode', 'none') if raw_registration else 'none'
                 raw_y = raw_registration.get('actual_y') if raw_registration else None
+                if raw_y is not None and crosscheck_registration_y is not None:
+                    detector_disagreement_px = abs(
+                        float(raw_y) - float(crosscheck_registration_y)
+                    )
                 tracked = raw_tracker.update(
                     raw_registration_y=raw_y,
                     raw_registration_mode=raw_mode,
@@ -1801,6 +1830,30 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                 registration_y = tracked.get('stable_registration_y')
                 crop_rect, crop_meta = get_scaled_relative_crop_rect(preview_bgr, registration_y)
 
+                anomaly_reasons = []
+                if detection_method == 'fallback':
+                    anomaly_reasons.append('fast_fallback')
+                elif detection_method == 'failed':
+                    anomaly_reasons.append('both_detectors_failed')
+                if len(sprockets) == 1:
+                    anomaly_reasons.append('single_sprocket')
+                elif len(sprockets) > 2:
+                    anomaly_reasons.append('unexpected_sprocket_count')
+                if partial_count > 0:
+                    anomaly_reasons.append('partial_sprocket')
+                if (
+                    detector_disagreement_px is not None
+                    and detector_disagreement_px > 20.0
+                ):
+                    anomaly_reasons.append('detector_disagreement')
+                if (
+                    raw_mode == 'pair'
+                    and raw_y is not None
+                    and previous_trusted_pair_y is not None
+                    and abs(float(raw_y) - float(previous_trusted_pair_y)) > 0.22 * preview_pitch
+                ):
+                    anomaly_reasons.append('registration_phase_jump')
+
                 if raw_mode == 'pair':
                     missing_pair_count = 0
                 else:
@@ -1808,6 +1861,11 @@ async def run_raw_capture(websocket, num_frames, stop_event):
 
                 steps_before_update = current_steps
                 correction = 0
+                reacquire_attempted = False
+                reacquire_valid = False
+                reacquire_steps = 0
+                reacquire_reason = None
+                reacquire_ms = 0.0
                 next_steps = max(min_steps, min(max_steps, base_steps))
                 if raw_y is not None:
                     error_px = float(target_y) - float(raw_y)
@@ -1819,6 +1877,7 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                         next_steps = max(min_steps, min(max_steps, base_steps + correction))
                         current_steps = next_steps
                         trusted_step_history.append(int(current_steps))
+                        previous_trusted_pair_y = float(raw_y)
                     else:
                         current_steps = next_steps
                 else:
@@ -1826,16 +1885,26 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                     current_steps = next_steps
 
                 if missing_pair_count >= 3:
+                    reacquire_attempted = True
+                    anomaly_reasons.append('reacquisition')
+                    reacquire_started = time.perf_counter()
                     reacquire = await reacquire_pair_registration(
                         camera, tc, raw_fallback_detector, target_y,
                         step_size=10, max_steps=300,
                     )
+                    reacquire_ms = (time.perf_counter() - reacquire_started) * 1000.0
+                    reacquire_valid = bool(reacquire.get('valid'))
+                    reacquire_steps = int(reacquire.get('steps', 0))
+                    reacquire_reason = reacquire.get('reason')
                     current_steps = (
                         int(round(float(np.median(np.array(trusted_step_history, dtype=float)))))
                         if trusted_step_history else nominal_steps_per_pitch
                     )
                     if reacquire.get('valid'):
                         missing_pair_count = 0
+                        reacquired_y = reacquire.get('registration_y')
+                        if reacquired_y is not None:
+                            previous_trusted_pair_y = float(reacquired_y)
 
                 encode_started = time.perf_counter()
                 ok, encoded = cv2.imencode(
@@ -1852,9 +1921,25 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                     fast_diagnostic_saved = True
                     print(f"[APP] Saved fast-detector diagnostic preview: {fast_diagnostic_path}")
 
-                await dng_future
+                collection_reasons = list(dict.fromkeys(anomaly_reasons))
+                if frame_index % 50 == 0:
+                    collection_reasons.append('control_sample')
+                anomaly_preview_path = None
+                if collection_reasons:
+                    reason_slug = '-'.join(collection_reasons)
+                    anomaly_preview_path = os.path.join(
+                        anomaly_path,
+                        f"frame_{frame_number:06d}_{reason_slug}.jpg",
+                    )
+                    with open(anomaly_preview_path, 'wb') as handle:
+                        handle.write(preview_bytes)
+                    if anomaly_reasons:
+                        anomaly_count += 1
+
+                dng_wait_started = time.perf_counter()
+                dng_write_ms = float(await dng_future)
+                dng_wait_ms = (time.perf_counter() - dng_wait_started) * 1000.0
                 os.replace(pending_dng_path, dng_path)
-                dng_ms = (time.perf_counter() - dng_started) * 1000.0
                 total_ms = (time.perf_counter() - frame_started) * 1000.0
 
                 frame_metadata = {
@@ -1870,6 +1955,18 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                     'orientation_degrees': 180,
                     'detection_method': detection_method,
                     'fast_failure_reason': fast_failure_reason,
+                    'crosscheck_sprockets': (
+                        [[float(value) for value in item] for item in crosscheck_sprockets]
+                        if crosscheck_sprockets is not None else None
+                    ),
+                    'crosscheck_registration_y': (
+                        float(crosscheck_registration_y)
+                        if crosscheck_registration_y is not None else None
+                    ),
+                    'detector_disagreement_px': (
+                        float(detector_disagreement_px)
+                        if detector_disagreement_px is not None else None
+                    ),
                     'sprockets': [[float(value) for value in item] for item in sprockets],
                     'raw_registration_mode': raw_mode,
                     'raw_registration_y': float(raw_y) if raw_y is not None else None,
@@ -1879,11 +1976,20 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                     'steps': int(steps_before_update),
                     'correction': int(correction),
                     'next_steps': int(current_steps),
+                    'reacquire_attempted': reacquire_attempted,
+                    'reacquire_valid': reacquire_valid,
+                    'reacquire_steps': reacquire_steps,
+                    'reacquire_reason': reacquire_reason,
+                    'reacquire_ms': round(reacquire_ms, 2),
+                    'anomaly_reasons': anomaly_reasons,
+                    'anomaly_preview_path': anomaly_preview_path,
                     'camera_exposure_time': int(camera_metadata.get('ExposureTime', applied_camera_settings.get('ExposureTime', EXPOSURE_TIME))),
                     'camera_analogue_gain': float(camera_metadata.get('AnalogueGain', applied_camera_settings.get('AnalogueGain', GAIN))),
                     'timing_detection_ms': round(detection_ms, 2),
                     'timing_preview_encode_ms': round(encode_ms, 2),
-                    'timing_dng_ms': round(dng_ms, 2),
+                    'timing_dng_write_ms': round(dng_write_ms, 2),
+                    'timing_dng_ms': round(dng_write_ms, 2),
+                    'timing_dng_wait_ms': round(dng_wait_ms, 2),
                     'timing_total_ms': round(total_ms, 2),
                     'discarded_stale_requests': int(discarded_requests),
                 }
@@ -1913,7 +2019,8 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                 print(
                     f"[APP] RAW frame {frame_number}: {detection_method}, "
                     f"discarded={discarded_requests} detect={detection_ms:.1f}ms "
-                    f"dng={dng_ms:.1f}ms total={total_ms:.1f}ms"
+                    f"dng_write={dng_write_ms:.1f}ms reacquire={reacquire_ms:.1f}ms "
+                    f"total={total_ms:.1f}ms anomalies={','.join(anomaly_reasons) or 'none'}"
                 )
             finally:
                 if dng_future is not None and not dng_future.done():
@@ -1924,7 +2031,17 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                 if request is not None:
                     request.release()
 
-        await websocket.send(json.dumps({'event': 'capture_complete', 'capture_mode': RAW_CAPTURE_MODE}))
+        await websocket.send(json.dumps({
+            'event': 'capture_complete',
+            'capture_mode': RAW_CAPTURE_MODE,
+            'anomaly_count': anomaly_count,
+            'anomaly_path': anomaly_path,
+            'metadata_path': metadata_path,
+        }))
+        print(
+            f"[APP] RAW capture complete: anomalies={anomaly_count}, "
+            f"anomaly_path={anomaly_path}"
+        )
     finally:
         tc.clean_up()
         camera.stop()
