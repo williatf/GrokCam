@@ -13,7 +13,11 @@ from registration import RegistrationTracker
 from sprocket import SprocketDetector
 from calibration_service import CalibrationService
 from fast_sprocket import FastSprocketDetector
-from transport_calibration import AdaptiveTransportController
+from transport_calibration import (
+    AdaptiveTransportController,
+    merge_calibration_settings,
+    resolve_nominal_steps,
+)
 import socket
 import os
 import re
@@ -648,8 +652,7 @@ def load_settings():
         with open("config.json", "r") as f:
             config = json.load(f)
     # config overrides calib
-    merged = {**calib, **config}
-    return merged
+    return merge_calibration_settings(calib, config)
 
 
 def refresh_runtime_settings():
@@ -1843,7 +1846,7 @@ async def run_raw_capture(websocket, num_frames, stop_event):
     print("[APP] RAW capture: LED on + camera, stabilizing...")
     try:
         await asyncio.sleep(2)
-        nominal_steps_per_pitch = int(settings.get("steps_per_pitch", STEPS_PER_PITCH))
+        nominal_steps_per_pitch = resolve_nominal_steps(settings, STEPS_PER_PITCH)
         calibrated_steps_per_px = float(settings.get("steps_per_px", steps_per_px))
         full_pixels_per_step = 1.0 / calibrated_steps_per_px if calibrated_steps_per_px > 0 else 9.0
         pixels_per_step = full_pixels_per_step * raw_preview_scale
@@ -1869,6 +1872,12 @@ async def run_raw_capture(websocket, num_frames, stop_event):
             adaptation_frames=int(settings.get('transport_adaptation_frames', 30)),
             warning_frames=int(settings.get('transport_saturation_warning_frames', 15)),
             warning_interval=int(settings.get('transport_saturation_warning_interval', 100)),
+            bias_window_size=int(settings.get('transport_bias_window_size', 300)),
+            bias_cooldown_samples=int(settings.get('transport_bias_cooldown_samples', 100)),
+            bias_median_threshold=float(settings.get('transport_bias_median_threshold', 4)),
+            bias_share_threshold=float(settings.get('transport_bias_share_threshold', 0.80)),
+            bias_stop_band=float(settings.get('transport_bias_stop_band', 1)),
+            bias_warning_interval=int(settings.get('transport_bias_warning_interval', 300)),
             state=saved_transport_state,
         )
         current_steps = transport.adaptive_base_steps
@@ -1886,6 +1895,13 @@ async def run_raw_capture(websocket, num_frames, stop_event):
             f"[APP] RAW registration controller: target_y={target_y:.2f}, "
             f"nominal_steps={nominal_steps_per_pitch}, exposure={applied_camera_settings['ExposureTime']}"
         )
+        if saved_transport_state and transport.restore_status != 'same_nominal_restored':
+            saved_nominal = saved_transport_state.get('configured_nominal_steps', 'missing')
+            print(
+                f"[APP] Transport state reset: status={transport.restore_status}, "
+                f"saved_nominal={saved_nominal}, configured_nominal={nominal_steps_per_pitch}, "
+                "adaptive base reset to configured nominal and integral reset to zero"
+            )
         print(
             "[APP] Transport calibration:\n"
             f"  adaptive base steps: {transport.adaptive_base_steps}\n"
@@ -2058,6 +2074,7 @@ async def run_raw_capture(websocket, num_frames, stop_event):
 
                 steps_before_update = current_steps
                 correction = 0
+                control_result = None
                 reacquire_attempted = False
                 reacquire_valid = False
                 reacquire_steps = 0
@@ -2089,6 +2106,20 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                             saturated_run = max(
                                 transport.negative_saturation_run,
                                 transport.positive_saturation_run,
+                            )
+                        if control_result.bias_warning:
+                            rolling = transport.rolling_statistics()
+                            print(
+                                f"[APP] WARNING: persistent transport bias: frame={frame_number} "
+                                f"window={rolling['sample_count']} median={rolling['median_correction']:+.1f} "
+                                f"negative_share={rolling['negative_share']:.1%} positive_share={rolling['positive_share']:.1%} "
+                                f"range={rolling['min_correction']:+d}..{rolling['max_correction']:+d} "
+                                f"adaptive_base={transport.adaptive_base_steps} nominal={nominal_steps_per_pitch} "
+                                f"integral={transport.integral_steps:+.3f} "
+                                f"correction_limits={transport.min_correction:+d}..{transport.max_correction:+d} "
+                                f"motor_limits={transport.min_command}..{transport.max_command} "
+                                f"status={control_result.bias_warning_status} "
+                                f"adaptation={control_result.adaptation_reason or 'none'}"
                             )
                             print(
                                 f"[APP] WARNING: sustained transport saturation: frame={frame_number} "
@@ -2200,6 +2231,14 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                     'registration_error_px': float(error_px) if error_px is not None else None,
                     'adaptive_base_steps': int(transport.adaptive_base_steps),
                     'transport_integral_steps': round(float(transport.integral_steps), 4),
+                    'configured_nominal_steps': int(nominal_steps_per_pitch),
+                    'transport_rolling_sample_count': len(transport.correction_window),
+                    'transport_rolling_median_correction': transport.rolling_statistics()['median_correction'],
+                    'transport_rolling_negative_share': transport.rolling_statistics()['negative_share'],
+                    'transport_rolling_positive_share': transport.rolling_statistics()['positive_share'],
+                    'transport_cooldown_remaining': transport.cooldown_remaining,
+                    'transport_last_adaptation_reason': transport.last_adaptation_reason,
+                    'transport_active_constraint': control_result.active_constraint if control_result else 'neither',
                     'correction': int(correction),
                     'next_steps': int(current_steps),
                     'reacquire_attempted': reacquire_attempted,
