@@ -13,6 +13,7 @@ from registration import RegistrationTracker
 from sprocket import SprocketDetector
 from calibration_service import CalibrationService
 from fast_sprocket import FastSprocketDetector
+from transport_calibration import AdaptiveTransportController
 import socket
 import os
 import re
@@ -1844,20 +1845,36 @@ async def run_raw_capture(websocket, num_frames, stop_event):
         await asyncio.sleep(2)
         nominal_steps_per_pitch = int(settings.get("steps_per_pitch", STEPS_PER_PITCH))
         calibrated_steps_per_px = float(settings.get("steps_per_px", steps_per_px))
-        base_steps = nominal_steps_per_pitch
-        adaptive_base_steps = float(base_steps)
         full_pixels_per_step = 1.0 / calibrated_steps_per_px if calibrated_steps_per_px > 0 else 9.0
         pixels_per_step = full_pixels_per_step * raw_preview_scale
-        current_steps = base_steps
-        # The 100-frame trace measured about 1.09 preview pixels per motor
-        # step and a zero-drift pitch near the calibrated 272-273 steps. Use a
-        # conservative proportional trim around that fixed baseline; do not
-        # integrate corrections into subsequent commands.
-        correction_gain = 0.25
-        max_correction = 4
         dead_band_px = 10.0 * raw_preview_scale
+        # These pre-existing 88%..112% bounds are the known safe transport
+        # envelope.  Correction and base learning are independently bounded
+        # inside it.
         min_steps = int(nominal_steps_per_pitch * 0.88)
         max_steps = int(nominal_steps_per_pitch * 1.12)
+        project_manifest = load_project_metadata(active_project_path)
+        saved_transport_state = None
+        if next_frame_number > 1:
+            saved_transport_state = project_manifest.get('transport_calibration_state')
+        transport = AdaptiveTransportController(
+            base_steps=nominal_steps_per_pitch,
+            pixels_per_step=pixels_per_step,
+            correction_gain=float(settings.get('transport_correction_gain', 0.25)),
+            integral_gain=float(settings.get('transport_integral_gain', 0.02)),
+            min_correction=int(settings.get('transport_min_correction', -8)),
+            max_correction=int(settings.get('transport_max_correction', 8)),
+            min_command=int(settings.get('transport_min_steps', min_steps)),
+            max_command=int(settings.get('transport_max_steps', max_steps)),
+            adaptation_frames=int(settings.get('transport_adaptation_frames', 30)),
+            warning_frames=int(settings.get('transport_saturation_warning_frames', 15)),
+            warning_interval=int(settings.get('transport_saturation_warning_interval', 100)),
+            state=saved_transport_state,
+        )
+        current_steps = transport.adaptive_base_steps
+        initial_transport_diagnostics = transport.diagnostics()
+        project_manifest['transport_calibration'] = initial_transport_diagnostics
+        save_project_metadata(project_manifest, active_project_path)
         # Crop calibration records the relationship between the picture crop
         # and whichever sprocket pair happened to be visible at that moment.
         # It is not a safe transport target: the saved value can put the upper
@@ -1868,6 +1885,12 @@ async def run_raw_capture(websocket, num_frames, stop_event):
         print(
             f"[APP] RAW registration controller: target_y={target_y:.2f}, "
             f"nominal_steps={nominal_steps_per_pitch}, exposure={applied_camera_settings['ExposureTime']}"
+        )
+        print(
+            "[APP] Transport calibration:\n"
+            f"  adaptive base steps: {transport.adaptive_base_steps}\n"
+            f"  correction range: {transport.min_correction:+d} .. {transport.max_correction:+d}\n"
+            f"  absolute motor command range: {transport.min_command} .. {transport.max_command}"
         )
         missing_pair_count = 0
         trusted_step_history = deque(maxlen=5)
@@ -2040,7 +2063,7 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                 reacquire_steps = 0
                 reacquire_reason = None
                 reacquire_ms = 0.0
-                next_steps = max(min_steps, min(max_steps, int(base_steps)))
+                next_steps = transport.adaptive_base_steps
                 if raw_y is not None:
                     error_px = float(target_y) - float(raw_y)
                     update_allowed = (
@@ -2055,27 +2078,32 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                         )
                     )
                     if update_allowed:
-                        if abs(error_px) > dead_band_px:
-                            # The live trace shows that increasing motor steps
-                            # increases the detected pair's Y coordinate. Keep
-                            # motor correction aligned with target_y - actual_y:
-                            # actual_y greater than target_y gets fewer steps.
-                            correction = int(round((error_px / pixels_per_step) * correction_gain))
-                            correction = max(-max_correction, min(max_correction, correction))
-                        next_steps = max(
-                            min_steps,
-                            min(max_steps, int(base_steps + correction)),
-                        )
+                        controlled_error = error_px if abs(error_px) > dead_band_px else 0.0
+                        control_result = transport.update(controlled_error)
+                        correction = control_result.correction
+                        next_steps = control_result.commanded_steps
                         current_steps = next_steps
-                        adaptive_base_steps = float(base_steps)
                         trusted_step_history.append(int(current_steps))
                         previous_trusted_pair_y = float(raw_y)
+                        if control_result.warning:
+                            saturated_run = max(
+                                transport.negative_saturation_run,
+                                transport.positive_saturation_run,
+                            )
+                            print(
+                                f"[APP] WARNING: sustained transport saturation: frame={frame_number} "
+                                f"correction={correction:+d} limits={transport.min_correction:+d}..{transport.max_correction:+d} "
+                                f"adaptive_base_steps={transport.adaptive_base_steps} "
+                                f"commanded_steps={current_steps} consecutive_frames={saturated_run}"
+                            )
                     else:
                         # Do not repeat a corrective command when registration
                         # is partial or otherwise untrusted.
+                        transport.update(None, trusted=False)
                         current_steps = next_steps
                 else:
                     error_px = None
+                    transport.update(None, trusted=False)
                     current_steps = next_steps
 
                 if missing_pair_count >= 3:
@@ -2090,8 +2118,7 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                     reacquire_valid = bool(reacquire.get('valid'))
                     reacquire_steps = int(reacquire.get('steps', 0))
                     reacquire_reason = reacquire.get('reason')
-                    current_steps = nominal_steps_per_pitch
-                    adaptive_base_steps = float(base_steps)
+                    current_steps = transport.adaptive_base_steps
                     if reacquire.get('valid'):
                         missing_pair_count = 0
                         reacquired_y = reacquire.get('registration_y')
@@ -2171,7 +2198,8 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                     'steps': int(steps_before_update),
                     'target_y': float(target_y),
                     'registration_error_px': float(error_px) if error_px is not None else None,
-                    'adaptive_base_steps': round(float(adaptive_base_steps), 3),
+                    'adaptive_base_steps': int(transport.adaptive_base_steps),
+                    'transport_integral_steps': round(float(transport.integral_steps), 4),
                     'correction': int(correction),
                     'next_steps': int(current_steps),
                     'reacquire_attempted': reacquire_attempted,
@@ -2193,6 +2221,11 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                     'discarded_stale_requests': int(discarded_requests),
                 }
                 append_registration_metadata(metadata_path, frame_metadata)
+                if frame_index % 10 == 0:
+                    project_manifest = load_project_metadata(active_project_path)
+                    project_manifest['transport_calibration_state'] = transport.state()
+                    project_manifest['transport_calibration'] = transport.diagnostics()
+                    save_project_metadata(project_manifest, active_project_path)
 
                 await websocket.send(json.dumps({
                     'event': 'capture_preview_v1',
@@ -2223,7 +2256,7 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                 print(
                     f"[APP] RAW frame {frame_number}: {detection_method}, {registration_log} "
                     f"steps={steps_before_update} "
-                    f"base={adaptive_base_steps:.2f} correction={correction:+d} next={current_steps}; "
+                    f"base={transport.adaptive_base_steps} correction={correction:+d} next={current_steps}; "
                     f"discarded={discarded_requests} detect={detection_ms:.1f}ms "
                     f"dng_write={dng_write_ms:.1f}ms reacquire={reacquire_ms:.1f}ms "
                     f"total={total_ms:.1f}ms anomalies={','.join(anomaly_reasons) or 'none'}"
@@ -2237,6 +2270,14 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                 if request is not None:
                     request.release()
 
+        project_manifest = load_project_metadata(active_project_path)
+        project_manifest['transport_calibration_state'] = transport.state()
+        project_manifest['transport_calibration'] = transport.diagnostics()
+        save_project_metadata(project_manifest, active_project_path)
+        append_registration_metadata(metadata_path, {
+            'event': 'transport_calibration_summary',
+            **transport.diagnostics(),
+        })
         await websocket.send(json.dumps({
             'event': 'capture_complete',
             'capture_mode': RAW_CAPTURE_MODE,
