@@ -2107,6 +2107,12 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                                 transport.negative_saturation_run,
                                 transport.positive_saturation_run,
                             )
+                            print(
+                                f"[APP] WARNING: sustained transport saturation: frame={frame_number} "
+                                f"correction={correction:+d} limits={transport.min_correction:+d}..{transport.max_correction:+d} "
+                                f"adaptive_base_steps={transport.adaptive_base_steps} "
+                                f"commanded_steps={current_steps} consecutive_frames={saturated_run}"
+                            )
                         if control_result.bias_warning:
                             rolling = transport.rolling_statistics()
                             print(
@@ -2120,12 +2126,6 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                                 f"motor_limits={transport.min_command}..{transport.max_command} "
                                 f"status={control_result.bias_warning_status} "
                                 f"adaptation={control_result.adaptation_reason or 'none'}"
-                            )
-                            print(
-                                f"[APP] WARNING: sustained transport saturation: frame={frame_number} "
-                                f"correction={correction:+d} limits={transport.min_correction:+d}..{transport.max_correction:+d} "
-                                f"adaptive_base_steps={transport.adaptive_base_steps} "
-                                f"commanded_steps={current_steps} consecutive_frames={saturated_run}"
                             )
                     else:
                         # Do not repeat a corrective command when registration
