@@ -770,7 +770,7 @@ def configure_legacy_camera():
 
 def configure_raw_camera():
     camera.configure(camera.create_still_configuration(
-        main={"size": RAW_PREVIEW_SIZE, "format": "BGR888"},
+        main={"size": RAW_PREVIEW_SIZE, "format": "RGB888"},
         raw={"size": RAW_SENSOR_SIZE, "format": "SRGGB12"},
         buffer_count=2,
     ))
