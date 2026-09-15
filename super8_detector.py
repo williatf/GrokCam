@@ -26,6 +26,16 @@ class Super8Detector:
         self.last_viable_count = 0
         self.last_partial_count = 0
         self.last_selected = None
+        self.last_candidates = []
+
+    def detect_calibration_candidates(self, frame_bgr):
+        """Return every complete candidate while preserving registration behavior."""
+        self.detect_registration(frame_bgr)
+        return [
+            dict(candidate)
+            for candidate in self.last_candidates
+            if candidate['classification'] == 'COMPLETE'
+        ]
 
     @staticmethod
     def _gaussian(value, target, sigma):
@@ -67,6 +77,9 @@ class Super8Detector:
             'close_kernel': self._scaled_odd_kernel(9, morphology_scale),
             'open_kernel': self._scaled_odd_kernel(5, morphology_scale),
         }
+
+    def calibration_roi_bounds(self, frame_shape):
+        return self._geometry(frame_shape)['roi']
 
     def detect_registration(self, frame_bgr):
         self.reset()
@@ -156,6 +169,7 @@ class Super8Detector:
             })
 
         candidates.sort(key=lambda item: item['score'], reverse=True)
+        self.last_candidates = [dict(candidate) for candidate in candidates]
         viable = [item for item in candidates if item['classification'] == 'COMPLETE']
         self.last_candidate_count = len(candidates)
         self.last_viable_count = len(viable)

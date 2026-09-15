@@ -11,9 +11,14 @@ import json
 from control import tcControl
 from registration import RegistrationTracker
 from sprocket import SprocketDetector
-from calibration_service import CalibrationService
+from calibration_service import Regular8CalibrationService
+from calibration_dispatch import (
+    PendingCalibrationProposal,
+    calibration_route,
+)
 from fast_sprocket import FastSprocketDetector
 from super8_detector import Super8Detector
+from super8_calibration_service import Super8CalibrationService
 from film_calibration import (
     FILM_FORMAT_REGULAR8,
     FILM_FORMAT_SUPER8,
@@ -538,122 +543,6 @@ def encode_frame(frame_cropped, frame_num):
     return header, jpg_bytes
 
 
-def compute_calibration_summary(samples):
-    pitch_values = [
-        float(sample['sprocket_pitch_px'])
-        for sample in samples
-        if sample.get('pitch_valid') and sample.get('sprocket_pitch_px') is not None
-    ]
-    area_values = []
-    for sample in samples:
-        for area in sample.get('full_sprocket_areas', []):
-            area_values.append(float(area))
-
-    valid_samples = sum(
-        1 for sample in samples
-        if sample.get('pitch_valid') and sample.get('sprocket_pitch_px') is not None
-    )
-
-    summary = {
-        'pitch_mean': None,
-        'pitch_min': None,
-        'pitch_max': None,
-        'pitch_std': None,
-        'area_mean': None,
-        'area_min': None,
-        'area_max': None,
-        'area_std': None,
-        'valid_samples': valid_samples,
-        'total_samples': len(samples),
-    }
-
-    if pitch_values:
-        pitch_array = np.array(pitch_values, dtype=float)
-        summary.update({
-            'pitch_mean': float(np.mean(pitch_array)),
-            'pitch_min': float(np.min(pitch_array)),
-            'pitch_max': float(np.max(pitch_array)),
-            'pitch_std': float(np.std(pitch_array)),
-        })
-
-    if area_values:
-        area_array = np.array(area_values, dtype=float)
-        summary.update({
-            'area_mean': float(np.mean(area_array)),
-            'area_min': float(np.min(area_array)),
-            'area_max': float(np.max(area_array)),
-            'area_std': float(np.std(area_array)),
-        })
-
-    return summary
-
-
-def filter_robust_values(values, max_mad_scale=3.5):
-    if not values:
-        return []
-
-    array = np.array(values, dtype=float)
-    median = float(np.median(array))
-    deviations = np.abs(array - median)
-    mad = float(np.median(deviations))
-    if mad <= 0:
-        return array.tolist()
-
-    threshold = mad * max_mad_scale
-    filtered = array[deviations <= threshold]
-    return filtered.tolist() if filtered.size else array.tolist()
-
-
-def build_proposed_calibration(samples, exposure_result, motor_calibration=None):
-    valid_pitch_values = [
-        float(sample['sprocket_pitch_px'])
-        for sample in samples
-        if sample.get('pitch_valid') and sample.get('sprocket_pitch_px') is not None
-    ]
-    valid_pitch_values = filter_robust_values(valid_pitch_values)
-
-    all_full_areas = []
-    for sample in samples:
-        all_full_areas.extend(float(area) for area in sample.get('full_sprocket_areas', []))
-    trusted_areas = filter_robust_values(all_full_areas)
-
-    if len(valid_pitch_values) < 5:
-        return None, False, 'need_at_least_5_valid_pitch_samples'
-    if not trusted_areas:
-        return None, False, 'need_trusted_full_sprocket_area_samples'
-
-    trusted_pitch = float(np.median(np.array(valid_pitch_values, dtype=float)))
-    trusted_area = float(np.median(np.array(trusted_areas, dtype=float)))
-    area_mad = float(np.median(np.abs(np.array(trusted_areas, dtype=float) - trusted_area))) if trusted_areas else 0.0
-    if trusted_area <= 0:
-        return None, False, 'invalid_trusted_area'
-
-    area_spread_frac = 0.05
-    if area_mad > 0:
-        area_spread_frac = max(0.05, min(0.12, (2.5 * area_mad) / trusted_area))
-
-    if motor_calibration and motor_calibration.get('motor_updated'):
-        steps_per_pitch_value = motor_calibration.get('motor_steps_per_pitch')
-    else:
-        steps_per_pitch_value = settings.get('steps_per_pitch', STEPS_PER_PITCH)
-
-    if steps_per_pitch_value is None:
-        return None, False, 'missing_steps_per_pitch'
-
-    steps_per_pitch_value = float(steps_per_pitch_value)
-    proposed_calibration = {
-        'calibration_version': 2,
-        'calibration_resolution': list(CALIBRATION_RES),
-        'exposure_time': int(exposure_result['exposure_time']),
-        'gain': 1.0,
-        'sprocket_pitch_px': trusted_pitch,
-        'steps_per_pitch': int(round(steps_per_pitch_value)),
-        'steps_per_px': steps_per_pitch_value / trusted_pitch,
-        'sprocket_area_min': int(round(trusted_area * (1.0 - area_spread_frac))),
-        'sprocket_area_max': int(round(trusted_area * (1.0 + area_spread_frac))),
-    }
-    return proposed_calibration, True, None
-
 # --- Load calibration + config ---
 def load_settings():
     calib = {}
@@ -683,7 +572,7 @@ def refresh_runtime_settings():
     gain = settings.get("gain", 1.0)
 
     if not pitch_px or not steps_per_pitch or not calib_res or not exposure_time or gain is None:
-        raise RuntimeError("Calibration data missing. Please run calibrate_16mm.py first.")
+        raise RuntimeError("Calibration data missing. Please run the production calibration workflow.")
 
     steps_per_px = settings.get("steps_per_px", steps_per_pitch / pitch_px)
 
@@ -711,6 +600,10 @@ def refresh_runtime_settings():
         raw_fallback_detector.dynamic_roi_bounds = None
         raw_fallback_detector.dynamic_roi_misses = 0
         raw_fallback_detector.dynamic_roi_candidates = []
+    if 'super8_calibration_detector' in globals():
+        super8_calibration_detector.reference_size = tuple(CALIBRATION_RES)
+        super8_calibration_detector.reset()
+        super8_calibrator.calibration_resolution = tuple(CALIBRATION_RES)
 
     print("[APP] Runtime calibration settings refreshed")
     if previous_resolution is not None and tuple(previous_resolution) != CALIBRATION_RES:
@@ -730,7 +623,7 @@ exposure_time = settings.get("exposure_time", 612)
 gain = settings.get("gain", 1.0)
 
 if not pitch_px or not steps_per_pitch or not calib_res or not exposure_time or gain is None:
-    raise RuntimeError("Calibration data missing. Please run calibrate_16mm.py first.")
+    raise RuntimeError("Calibration data missing. Please run the production calibration workflow.")
 
 steps_per_px = steps_per_pitch / pitch_px
 
@@ -1148,12 +1041,16 @@ async def tune_calibration_exposure(camera, detector, target=225, percentile=99.
         if frame_bgr is None:
             raise RuntimeError('Failed to decode calibration exposure frame')
 
-        frame_h, frame_w = frame_bgr.shape[:2]
-        strip_w = max(1, int(frame_w * detector.auto_roi))
-        if detector.side == 'left':
-            roi = frame_bgr[:, :strip_w]
+        if hasattr(detector, 'calibration_roi_bounds'):
+            x1, y1, x2, y2 = detector.calibration_roi_bounds(frame_bgr.shape)
+            roi = frame_bgr[y1:y2, x1:x2]
         else:
-            roi = frame_bgr[:, -strip_w:]
+            frame_h, frame_w = frame_bgr.shape[:2]
+            strip_w = max(1, int(frame_w * detector.auto_roi))
+            if detector.side == 'left':
+                roi = frame_bgr[:, :strip_w]
+            else:
+                roi = frame_bgr[:, -strip_w:]
 
         gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         last_percentile = float(np.percentile(gray_roi, percentile))
@@ -1211,113 +1108,6 @@ async def prepare_calibration_camera_settings(detector):
     exposure_result = await tune_calibration_exposure(camera, detector)
     exposure_result['source'] = 'auto_calibration'
     return exposure_result
-
-
-async def seek_two_full_sprockets(camera, tc, detector, step_size=10, max_steps=500, settle_delay=0.05):
-    total_steps = 0
-
-    while total_steps <= max_steps:
-        buffer = io.BytesIO()
-        camera.capture_file(buffer, format='jpeg')
-        frame_bgr = cv2.imdecode(np.frombuffer(buffer.getvalue(), np.uint8), cv2.IMREAD_COLOR)
-        if frame_bgr is None:
-            return {
-                'valid': False,
-                'reason': 'failed_to_decode_seek_frame',
-                'steps': total_steps,
-            }
-
-        sprockets = detector.detect(frame_bgr, mode='profile') or []
-        classified = detector.classify_sprockets(sprockets, frame_bgr.shape)
-        full_sprocket_count = sum(1 for item in classified if item.get('status') == 'full')
-
-        if full_sprocket_count == 2:
-            return {
-                'valid': True,
-                'steps': total_steps,
-                'full_sprocket_count': 2,
-                'sprocket_count': len(sprockets),
-            }
-
-        if total_steps >= max_steps:
-            break
-
-        tc.steps_forward(step_size)
-        total_steps += step_size
-        await asyncio.sleep(settle_delay)
-
-    return {
-        'valid': False,
-        'reason': 'did_not_find_two_full_sprockets',
-        'steps': total_steps,
-    }
-
-
-async def measure_steps_per_pitch_live(camera, tc, detector, sprocket_pitch_px, step_chunk=20, max_steps=500):
-    def choose_reference_y(frame_bgr, sprockets):
-        # Motor calibration must follow one physical sprocket, not a pair midpoint.
-        classified = detector.classify_sprockets(sprockets, frame_bgr.shape)
-        full_sprockets = [item['sprocket'] for item in classified if item.get('status') == 'full']
-        if full_sprockets:
-            center_y = frame_bgr.shape[0] / 2.0
-            anchor = min(full_sprockets, key=lambda sprocket: abs(sprocket[1] - center_y))
-            return float(anchor[1])
-
-        return None
-
-    buffer = io.BytesIO()
-    camera.capture_file(buffer, format='jpeg')
-    frame_bgr = cv2.imdecode(np.frombuffer(buffer.getvalue(), np.uint8), cv2.IMREAD_COLOR)
-    if frame_bgr is None:
-        return {'valid': False, 'reason': 'failed_to_decode_start_frame'}
-
-    sprockets = detector.detect(frame_bgr, mode='profile') or []
-    if not sprockets:
-        return {'valid': False, 'reason': 'no_sprockets_in_start_frame'}
-
-    start_y = choose_reference_y(frame_bgr, sprockets)
-    if start_y is None:
-        return {'valid': False, 'reason': 'no_stable_registration_reference'}
-
-    total_steps = 0
-    threshold = float(sprocket_pitch_px) * 0.85
-
-    while total_steps < max_steps:
-        tc.steps_forward(step_chunk)
-        total_steps += step_chunk
-        await asyncio.sleep(0.05)
-
-        buffer = io.BytesIO()
-        camera.capture_file(buffer, format='jpeg')
-        frame_bgr = cv2.imdecode(np.frombuffer(buffer.getvalue(), np.uint8), cv2.IMREAD_COLOR)
-        if frame_bgr is None:
-            continue
-
-        sprockets = detector.detect(frame_bgr, mode='profile') or []
-        if not sprockets:
-            continue
-
-        current_y = choose_reference_y(frame_bgr, sprockets)
-        if current_y is None:
-            continue
-
-        delta_y = abs(float(current_y) - float(start_y))
-        if delta_y >= threshold:
-            steps_per_px_value = total_steps / delta_y
-            steps_per_pitch_value = steps_per_px_value * float(sprocket_pitch_px)
-            return {
-                'steps_per_pitch': int(round(steps_per_pitch_value)),
-                'steps_per_px': float(steps_per_px_value),
-                'total_steps': int(total_steps),
-                'delta_y': float(delta_y),
-                'valid': True,
-            }
-
-    return {
-        'valid': False,
-        'reason': 'did_not_reach_pitch_threshold',
-        'total_steps': int(total_steps),
-    }
 
 
 async def advance_and_register_frame(camera, tc, detector,
@@ -1485,7 +1275,36 @@ def reset_registration_tracking(reason=None, baseline_registration_y=None):
     if reason:
         print(f"[APP] Registration tracker reset: {reason}")
 
-calibrator = CalibrationService(camera, tc, detector, settings)
+calibrator = Regular8CalibrationService(camera, tc, detector, settings)
+super8_calibration_detector = Super8Detector(reference_size=CALIBRATION_RES)
+super8_calibrator = Super8CalibrationService(
+    camera,
+    tc,
+    super8_calibration_detector,
+    calibration_resolution=CALIBRATION_RES,
+)
+
+
+def get_calibration_context():
+    if not active_project_path:
+        raise RuntimeError('No active project selected')
+    film_format = get_project_film_format(active_project_path)
+    route = calibration_route(film_format)
+    if film_format == FILM_FORMAT_SUPER8:
+        service = super8_calibrator
+        calibration_detector = super8_calibration_detector
+        service.search_steps_per_pitch = load_film_calibration(
+            film_format
+        ).values.get('steps_per_pitch')
+    else:
+        service = calibrator
+        calibration_detector = detector
+    return {
+        **route,
+        'service': service,
+        'detector': calibration_detector,
+        'project_path': os.path.abspath(active_project_path),
+    }
 
 last_error = 0 # difference between actual and target for sprocket detection
 
@@ -3192,16 +3011,35 @@ async def handle_client(websocket):
                 debug_scale = float(data.get('debug_scale', 1.0))
 
                 try:
+                    calibration_context = get_calibration_context()
+                    if calibration_context['film_format'] == FILM_FORMAT_SUPER8:
+                        configure_legacy_camera()
                     tc.light_on()
                     camera.start()
                     print("[APP] LED on + camera, stabilizing for calibration preview...")
                     await asyncio.sleep(0.5)
-                    exposure_result = await prepare_calibration_camera_settings(detector)
+                    exposure_result = await prepare_calibration_camera_settings(
+                        calibration_context['detector']
+                    )
 
-                    measurement, jpg_bytes = calibrator.capture_sprocket_preview(debug_scale)
+                    if calibration_context['film_format'] == FILM_FORMAT_SUPER8:
+                        measurement, jpg_bytes = (
+                            calibration_context['service'].capture_calibration_preview(
+                                debug_scale
+                            )
+                        )
+                    else:
+                        measurement, jpg_bytes = (
+                            calibration_context['service'].capture_sprocket_preview(
+                                debug_scale
+                            )
+                        )
 
                     await websocket.send(json.dumps({
                         'event': 'calibration_measurement',
+                        'film_format': calibration_context['film_format'],
+                        'calibration_mode': calibration_context['mode'],
+                        'calibration_destination': calibration_context['destination'],
                         **measurement,
                         'exposure': exposure_result,
                         'size': len(jpg_bytes)
@@ -3493,6 +3331,99 @@ async def handle_client(websocket):
                 latest_save_block_reason = 'calibration_sweep_in_progress'
 
                 try:
+                    calibration_context = get_calibration_context()
+                    film_format = calibration_context['film_format']
+                    calibration_mode = calibration_context['mode']
+                    calibration_destination = calibration_context['destination']
+
+                    if film_format == FILM_FORMAT_SUPER8:
+                        target_transitions = min(
+                            10,
+                            max(
+                                Super8CalibrationService.MIN_TRANSITIONS,
+                                int(data.get(
+                                    'transitions',
+                                    Super8CalibrationService.TARGET_TRANSITIONS,
+                                )),
+                            ),
+                        )
+                        await websocket.send(json.dumps({
+                            'event': 'calibration_sweep_progress',
+                            'phase': 'starting',
+                            'completed': 0,
+                            'total': target_transitions,
+                            'film_format': film_format,
+                            'calibration_mode': calibration_mode,
+                            'calibration_destination': calibration_destination,
+                            'message': 'Starting Super 8 physical-perforation calibration…',
+                        }))
+                        configure_legacy_camera()
+                        tc.light_on()
+                        camera.start()
+                        await asyncio.sleep(0.5)
+                        exposure_result = await prepare_calibration_camera_settings(
+                            calibration_context['detector']
+                        )
+
+                        async def send_super8_calibration_progress(progress):
+                            await websocket.send(json.dumps({
+                                'event': 'calibration_sweep_progress',
+                                'phase': 'tracking',
+                                'completed': progress['completed_transitions'],
+                                'total': progress['target_transitions'],
+                                'film_format': film_format,
+                                'calibration_mode': calibration_mode,
+                                'calibration_destination': calibration_destination,
+                                **progress,
+                            }))
+
+                        calibration_result = await calibration_context[
+                            'service'
+                        ].run_calibration(
+                            target_transitions=target_transitions,
+                            step_size=seek_step_size,
+                            max_steps_per_transition=500,
+                            settle_delay=0.05,
+                            progress_callback=send_super8_calibration_progress,
+                        )
+                        if calibration_result.get('valid'):
+                            proposed_calibration, can_save, save_block_reason = (
+                                calibration_context['service'].build_proposal(
+                                    calibration_result,
+                                    exposure_result,
+                                )
+                            )
+                        else:
+                            proposed_calibration = None
+                            can_save = False
+                            save_block_reason = calibration_result.get(
+                                'reason', 'super8_calibration_failed'
+                            )
+
+                        if can_save and proposed_calibration:
+                            latest_proposed_calibration = (
+                                PendingCalibrationProposal.create(
+                                    calibration_context['project_path'],
+                                    film_format,
+                                    calibration_destination,
+                                    calibration_mode,
+                                    proposed_calibration,
+                                )
+                            )
+                        latest_can_save = can_save
+                        latest_save_block_reason = save_block_reason
+                        await websocket.send(json.dumps({
+                            'event': 'calibration_sweep_complete',
+                            'film_format': film_format,
+                            'calibration_mode': calibration_mode,
+                            'calibration_destination': calibration_destination,
+                            'summary': calibration_result,
+                            'proposed_calibration': proposed_calibration,
+                            'can_save': can_save,
+                            'save_block_reason': save_block_reason,
+                        }))
+                        continue
+
                     print(f"[APP] Starting calibration sweep: samples={total_samples}, step_size={step_size}, debug_scale={debug_scale}")
                     progress_total = total_samples + 7
                     await websocket.send(json.dumps({
@@ -3510,10 +3441,7 @@ async def handle_client(websocket):
                         'completed': 1, 'total': progress_total,
                         'message': 'Exposure set; finding two complete sprockets…'
                     }))
-                    seek_result = await seek_two_full_sprockets(
-                        camera,
-                        tc,
-                        detector,
+                    seek_result = await calibrator.seek_two_full_sprockets(
                         step_size=seek_step_size,
                         max_steps=500,
                         settle_delay=0.05,
@@ -3561,7 +3489,7 @@ async def handle_client(websocket):
                             print(f"[APP] Calibration sweep moved forward {step_size} steps")
                             await asyncio.sleep(0.15)
 
-                    summary = compute_calibration_summary(sweep_samples)
+                    summary = calibrator.compute_summary(sweep_samples)
                     trusted_pitch_for_motor = summary.get('pitch_mean')
                     if trusted_pitch_for_motor is None:
                         trusted_pitch_for_motor = settings.get('sprocket_pitch_px', 814)
@@ -3574,10 +3502,7 @@ async def handle_client(websocket):
                             'total': progress_total,
                             'message': f'Measuring transport run {motor_run_index + 1} of {motor_total_runs}…'
                         }))
-                        motor_result = await measure_steps_per_pitch_live(
-                            camera,
-                            tc,
-                            detector,
+                        motor_result = await calibrator.measure_steps_per_pitch(
                             trusted_pitch_for_motor,
                             step_chunk=20,
                             max_steps=500,
@@ -3594,7 +3519,7 @@ async def handle_client(websocket):
                         for result in motor_runs
                         if result.get('valid') and result.get('steps_per_pitch') is not None
                     ]
-                    filtered_motor_steps = filter_robust_values(valid_motor_steps)
+                    filtered_motor_steps = calibrator.filter_robust_values(valid_motor_steps)
                     motor_valid_runs = len(valid_motor_steps)
                     motor_updated = len(filtered_motor_steps) >= 3
                     motor_steps_per_pitch = None
@@ -3608,12 +3533,19 @@ async def handle_client(websocket):
                         'motor_updated': motor_updated,
                     }
 
-                    proposed_calibration, can_save, save_block_reason = build_proposed_calibration(
+                    proposed_calibration, can_save, save_block_reason = calibrator.build_proposed_calibration(
                         sweep_samples,
                         exposure_result,
                         motor_calibration,
                     )
-                    latest_proposed_calibration = proposed_calibration
+                    if can_save and proposed_calibration:
+                        latest_proposed_calibration = PendingCalibrationProposal.create(
+                            calibration_context['project_path'],
+                            film_format,
+                            calibration_destination,
+                            calibration_mode,
+                            proposed_calibration,
+                        )
                     latest_can_save = can_save
                     latest_save_block_reason = save_block_reason
                     summary['seek'] = seek_result
@@ -3625,6 +3557,9 @@ async def handle_client(websocket):
                     print(f"[APP] Calibration sweep complete: {summary}")
                     await websocket.send(json.dumps({
                         'event': 'calibration_sweep_complete',
+                        'film_format': film_format,
+                        'calibration_mode': calibration_mode,
+                        'calibration_destination': calibration_destination,
                         'summary': summary,
                         'proposed_calibration': proposed_calibration,
                         'can_save': can_save,
@@ -3655,22 +3590,54 @@ async def handle_client(websocket):
                     continue
 
                 try:
-                    backup_path = calibrator.save_calibration(latest_proposed_calibration)
-                    refresh_runtime_settings()
-                    apply_capture_camera_controls()
-                    print(f"[APP] Calibration saved to calibration.json (backup={backup_path})")
-                    await websocket.send(json.dumps({
-                        'event': 'calibration_saved',
-                        'message': 'Calibration saved and runtime settings refreshed',
-                        'settings': {
+                    calibration_context = get_calibration_context()
+                    context_valid, context_reason = latest_proposed_calibration.validate(
+                        calibration_context['project_path'],
+                        calibration_context['film_format'],
+                        calibration_context['destination'],
+                        calibration_context['mode'],
+                    )
+                    if not context_valid:
+                        latest_can_save = False
+                        latest_save_block_reason = context_reason
+                        await websocket.send(json.dumps({
+                            'event': 'calibration_save_blocked',
+                            'reason': context_reason,
+                        }))
+                        continue
+
+                    backup_path = calibration_context['service'].save_calibration(
+                        latest_proposed_calibration.values
+                    )
+                    if calibration_context['film_format'] == FILM_FORMAT_REGULAR8:
+                        refresh_runtime_settings()
+                        apply_capture_camera_controls()
+                        saved_settings = {
                             'exposure_time': EXPOSURE_TIME,
                             'gain': GAIN,
                             'sprocket_pitch_px': SPROCKET_PITCH_PX,
                             'steps_per_pitch': STEPS_PER_PITCH,
                             'steps_per_px': steps_per_px,
                             'sprocket_area_min': detector.min_area,
-                            'sprocket_area_max': detector.max_area
-                        },
+                            'sprocket_area_max': detector.max_area,
+                        }
+                    else:
+                        saved_settings = dict(latest_proposed_calibration.values)
+                    print(
+                        f"[APP] Calibration saved to "
+                        f"{calibration_context['destination']} (backup={backup_path})"
+                    )
+                    await websocket.send(json.dumps({
+                        'event': 'calibration_saved',
+                        'message': (
+                            'Calibration saved and runtime settings refreshed'
+                            if calibration_context['film_format'] == FILM_FORMAT_REGULAR8
+                            else 'Super 8 calibration saved'
+                        ),
+                        'film_format': calibration_context['film_format'],
+                        'calibration_mode': calibration_context['mode'],
+                        'calibration_destination': calibration_context['destination'],
+                        'settings': saved_settings,
                         'backup_path': backup_path
                     }))
                 except Exception as exc:
