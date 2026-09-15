@@ -14,10 +14,17 @@ from sprocket import SprocketDetector
 from calibration_service import CalibrationService
 from fast_sprocket import FastSprocketDetector
 from super8_detector import Super8Detector
+from film_calibration import (
+    FILM_FORMAT_REGULAR8,
+    FILM_FORMAT_SUPER8,
+    load_film_calibration,
+    normalize_film_format,
+    resolve_raw_preview_transport,
+)
 from transport_calibration import (
     AdaptiveTransportController,
+    calculate_observational_transport,
     merge_calibration_settings,
-    resolve_nominal_steps,
 )
 import socket
 import os
@@ -29,9 +36,6 @@ RAW_CAPTURE_MODE = 'raw_dng_v1'
 RAW_SENSOR_SIZE = (2028, 1520)
 RAW_PREVIEW_SIZE = (760, 570)
 RAW_SAFE_DEFAULT_EXPOSURE_TIME = 1114
-FILM_FORMAT_REGULAR8 = 'regular8'
-FILM_FORMAT_SUPER8 = 'super8'
-SUPPORTED_FILM_FORMATS = (FILM_FORMAT_REGULAR8, FILM_FORMAT_SUPER8)
 
 async def troubleshoot_sprocket_detection(camera, websocket, tc, detector,
                                           step_size=None, delay=0.05):
@@ -342,15 +346,6 @@ def save_project_metadata(payload, project_path=None):
         json.dump(payload, handle, indent=2)
         handle.write('\n')
     os.replace(temporary_path, metadata_path)
-
-
-def normalize_film_format(value):
-    normalized = str(value or FILM_FORMAT_REGULAR8).strip().lower().replace('_', '')
-    if normalized not in SUPPORTED_FILM_FORMATS:
-        raise ValueError(
-            f"Unsupported film_format {value!r}; expected one of {', '.join(SUPPORTED_FILM_FORMATS)}"
-        )
-    return normalized
 
 
 def get_project_film_format(project_path=None):
@@ -1865,7 +1860,21 @@ async def run_raw_capture(websocket, num_frames, stop_event):
     applied_camera_settings = apply_raw_capture_camera_controls()
     raw_fast_detector.reset()
     raw_super8_detector.reset()
-    preview_pitch = SPROCKET_PITCH_PX * raw_preview_scale
+    film_calibration = load_film_calibration(film_format)
+    raw_transport_calibration = resolve_raw_preview_transport(
+        film_calibration,
+        RAW_PREVIEW_SIZE,
+    )
+    nominal_steps_per_pitch = raw_transport_calibration['steps_per_pitch']
+    preview_pitch = raw_transport_calibration['preview_sprocket_pitch_px']
+    pixels_per_step = raw_transport_calibration['preview_pixels_per_step']
+    if not super8_mode and preview_pitch is None:
+        raise RuntimeError('Regular 8 calibration is missing sprocket_pitch_px')
+    if pixels_per_step is None:
+        raise RuntimeError(
+            f"{film_format} calibration does not provide transport pixel geometry "
+            "for the active RAW preview"
+        )
     raw_tracker = RegistrationTracker(
         expected_sprocket_pitch_px=preview_pitch,
         max_jump_px=40.0 * raw_preview_scale,
@@ -1877,10 +1886,6 @@ async def run_raw_capture(websocket, num_frames, stop_event):
     print("[APP] RAW capture: LED on + camera, stabilizing...")
     try:
         await asyncio.sleep(2)
-        nominal_steps_per_pitch = resolve_nominal_steps(settings, STEPS_PER_PITCH)
-        calibrated_steps_per_px = float(settings.get("steps_per_px", steps_per_px))
-        full_pixels_per_step = 1.0 / calibrated_steps_per_px if calibrated_steps_per_px > 0 else 9.0
-        pixels_per_step = full_pixels_per_step * raw_preview_scale
         dead_band_px = 10.0 * raw_preview_scale
         # These pre-existing 88%..112% bounds are the known safe transport
         # envelope.  Correction and base learning are independently bounded
@@ -1916,6 +1921,8 @@ async def run_raw_capture(websocket, num_frames, stop_event):
         initial_transport_diagnostics['correction_mode'] = transport_correction_mode
         project_manifest['film_format'] = film_format
         project_manifest['transport_correction_mode'] = transport_correction_mode
+        project_manifest['transport_calibration_source'] = film_calibration.source_name
+        project_manifest['transport_calibration_status'] = film_calibration.status
         if super8_mode:
             project_manifest['transport_observation'] = initial_transport_diagnostics
         else:
@@ -1931,6 +1938,7 @@ async def run_raw_capture(websocket, num_frames, stop_event):
         print(
             f"[APP] RAW registration controller: target_y={target_y:.2f}, "
             f"nominal_steps={nominal_steps_per_pitch}, film_format={film_format}, "
+            f"calibration={film_calibration.source_name} ({film_calibration.status}), "
             f"exposure={applied_camera_settings['ExposureTime']}"
         )
         if saved_transport_state and transport.restore_status != 'same_nominal_restored':
@@ -2152,24 +2160,20 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                 if raw_y is not None:
                     error_px = float(target_y) - float(raw_y)
                     if super8_mode:
-                        controlled_error = error_px if abs(error_px) > dead_band_px else 0.0
-                        proportional = (
-                            controlled_error / pixels_per_step
-                            * float(settings.get('transport_correction_gain', 0.25))
+                        observation = calculate_observational_transport(
+                            error_px=error_px,
+                            nominal_steps=nominal_steps_per_pitch,
+                            pixels_per_step=pixels_per_step,
+                            correction_gain=float(settings.get('transport_correction_gain', 0.25)),
+                            dead_band_px=dead_band_px,
+                            min_correction=transport.min_correction,
+                            max_correction=transport.max_correction,
+                            min_command=transport.min_command,
+                            max_command=transport.max_command,
                         )
-                        observational_correction = int(round(proportional))
-                        observational_correction = max(
-                            transport.min_correction,
-                            min(transport.max_correction, observational_correction),
-                        )
-                        observational_next_steps = max(
-                            transport.min_command,
-                            min(
-                                transport.max_command,
-                                nominal_steps_per_pitch + observational_correction,
-                            ),
-                        )
-                        next_steps = nominal_steps_per_pitch
+                        observational_correction = observation.correction
+                        observational_next_steps = observation.observed_next_steps
+                        next_steps = observation.commanded_steps
                         current_steps = next_steps
                     else:
                         update_allowed = (
@@ -2325,6 +2329,9 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                     'transport_integral_steps': round(float(transport.integral_steps), 4),
                     'configured_nominal_steps': int(nominal_steps_per_pitch),
                     'transport_correction_mode': transport_correction_mode,
+                    'transport_calibration_source': film_calibration.source_name,
+                    'transport_calibration_status': film_calibration.status,
+                    'transport_pixels_per_step_source': raw_transport_calibration['pixels_per_step_source'],
                     'observational_correction': observational_correction,
                     'observational_next_steps': observational_next_steps,
                     'transport_rolling_sample_count': len(transport.correction_window),
@@ -2430,6 +2437,8 @@ async def run_raw_capture(websocket, num_frames, stop_event):
             ),
             'film_format': film_format,
             'transport_correction_mode': transport_correction_mode,
+            'transport_calibration_source': film_calibration.source_name,
+            'transport_calibration_status': film_calibration.status,
             **final_transport_diagnostics,
         })
         await websocket.send(json.dumps({
@@ -2455,6 +2464,12 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
     print("[APP] Capture task starting")
     if not active_project_path:
         raise RuntimeError("No active project selected")
+
+    film_format = get_project_film_format(active_project_path)
+    if film_format != FILM_FORMAT_REGULAR8:
+        raise RuntimeError(
+            "Super 8 capture requires RAW DNG capture mode; legacy PNG capture is Regular 8 only"
+        )
 
     project_name = active_project_name
     project_path = active_project_path

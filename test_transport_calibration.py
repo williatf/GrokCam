@@ -1,5 +1,10 @@
 import unittest
-from transport_calibration import AdaptiveTransportController, merge_calibration_settings, resolve_nominal_steps
+from transport_calibration import (
+    AdaptiveTransportController,
+    calculate_observational_transport,
+    merge_calibration_settings,
+    resolve_nominal_steps,
+)
 
 
 def controller(**kw):
@@ -79,6 +84,22 @@ class TransportCalibrationTests(unittest.TestCase):
         self.assertEqual(resolve_nominal_steps(merged), 272)
         self.assertEqual(resolve_nominal_steps({}), 280)
         self.assertEqual(resolve_nominal_steps({'steps_per_pitch_avg': 281}), 280)
+
+    def test_super8_observation_does_not_change_physical_command(self):
+        result = calculate_observational_transport(
+            error_px=28.0,
+            nominal_steps=303,
+            pixels_per_step=1.0522,
+            correction_gain=0.25,
+            dead_band_px=3.75,
+            min_correction=-8,
+            max_correction=8,
+            min_command=266,
+            max_command=339,
+        )
+        self.assertEqual(result.commanded_steps, 303)
+        self.assertNotEqual(result.observed_next_steps, result.commanded_steps)
+        self.assertNotEqual(result.correction, 0)
 
     def test_warning_rate_limit_summary_and_simulation(self):
         c = controller(bias_warning_interval=100)

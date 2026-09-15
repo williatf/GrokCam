@@ -1,0 +1,16 @@
+{
+  "calibration_version": 1,
+  "film_format": "super8",
+  "status": "provisional",
+  "source": "2026-09-15 100-frame advancing capture",
+  "steps_per_pitch": 303,
+  "transport_observation": {
+    "status": "observational",
+    "source": "2026-09-15 100-frame advancing capture",
+    "raw_preview_size": [
+      760,
+      570
+    ],
+    "pixels_per_step": 1.0522
+  }
+}

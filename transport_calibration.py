@@ -32,6 +32,38 @@ class TransportResult:
         return self.saturation_warning
 
 
+@dataclass
+class ObservationalTransportResult:
+    correction: int
+    observed_next_steps: int
+    commanded_steps: int
+
+
+def calculate_observational_transport(error_px, nominal_steps, pixels_per_step,
+                                      correction_gain, dead_band_px,
+                                      min_correction, max_correction,
+                                      min_command, max_command):
+    """Calculate a correction without applying it to the physical command."""
+    nominal_steps = int(nominal_steps)
+    pixels_per_step = float(pixels_per_step)
+    if pixels_per_step <= 0:
+        raise ValueError('pixels_per_step must be positive')
+
+    controlled_error = float(error_px) if abs(float(error_px)) > float(dead_band_px) else 0.0
+    proportional = controlled_error / pixels_per_step * float(correction_gain)
+    correction = int(round(proportional))
+    correction = max(int(min_correction), min(int(max_correction), correction))
+    observed_next_steps = max(
+        int(min_command),
+        min(int(max_command), nominal_steps + correction),
+    )
+    return ObservationalTransportResult(
+        correction=correction,
+        observed_next_steps=observed_next_steps,
+        commanded_steps=nominal_steps,
+    )
+
+
 class AdaptiveTransportController:
     STATE_VERSION = 2
 
