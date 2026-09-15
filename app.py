@@ -13,6 +13,7 @@ from registration import RegistrationTracker
 from sprocket import SprocketDetector
 from calibration_service import CalibrationService
 from fast_sprocket import FastSprocketDetector
+from super8_detector import Super8Detector
 from transport_calibration import (
     AdaptiveTransportController,
     merge_calibration_settings,
@@ -28,6 +29,9 @@ RAW_CAPTURE_MODE = 'raw_dng_v1'
 RAW_SENSOR_SIZE = (2028, 1520)
 RAW_PREVIEW_SIZE = (760, 570)
 RAW_SAFE_DEFAULT_EXPOSURE_TIME = 1114
+FILM_FORMAT_REGULAR8 = 'regular8'
+FILM_FORMAT_SUPER8 = 'super8'
+SUPPORTED_FILM_FORMATS = (FILM_FORMAT_REGULAR8, FILM_FORMAT_SUPER8)
 
 async def troubleshoot_sprocket_detection(camera, websocket, tc, detector,
                                           step_size=None, delay=0.05):
@@ -338,6 +342,20 @@ def save_project_metadata(payload, project_path=None):
         json.dump(payload, handle, indent=2)
         handle.write('\n')
     os.replace(temporary_path, metadata_path)
+
+
+def normalize_film_format(value):
+    normalized = str(value or FILM_FORMAT_REGULAR8).strip().lower().replace('_', '')
+    if normalized not in SUPPORTED_FILM_FORMATS:
+        raise ValueError(
+            f"Unsupported film_format {value!r}; expected one of {', '.join(SUPPORTED_FILM_FORMATS)}"
+        )
+    return normalized
+
+
+def get_project_film_format(project_path=None):
+    metadata = load_project_metadata(project_path)
+    return normalize_film_format(metadata.get('film_format', FILM_FORMAT_REGULAR8))
 
 
 def get_effective_crop_settings(project_path=None):
@@ -1449,6 +1467,7 @@ raw_fallback_detector = SprocketDetector(
     method="profile",
 )
 raw_fallback_detector.expected_pitch = int(round(SPROCKET_PITCH_PX * raw_preview_scale))
+raw_super8_detector = Super8Detector(reference_size=RAW_SENSOR_SIZE)
 
 registration_tracker = RegistrationTracker(
     expected_sprocket_pitch_px=SPROCKET_PITCH_PX,
@@ -1641,7 +1660,7 @@ def set_active_project(project_name, project_safe_name, project_path):
     active_project_path = project_path
 
 
-def create_or_select_project(project_name):
+def create_or_select_project(project_name, film_format=None):
     global latest_crop_preview_pair_midpoint, calibrated_baseline_registration_y
     safe_name = sanitize_project_name(project_name)
     project_path, frames_path, debug_path, metadata_path = get_project_paths(safe_name)
@@ -1665,6 +1684,9 @@ def create_or_select_project(project_name):
         "created_timestamp": created_timestamp,
         "base_path": PROJECTS_BASE_DIR,
         "project_path": project_path,
+        "film_format": normalize_film_format(
+            film_format if film_format is not None else existing_metadata.get('film_format')
+        ),
     }
 
     if not isinstance(metadata.get('crop'), dict):
@@ -1695,6 +1717,7 @@ def create_or_select_project(project_name):
         "frames_path": frames_path,
         "debug_path": debug_path,
         "metadata_path": metadata_path,
+        "film_format": metadata["film_format"],
     }
 
 
@@ -1707,11 +1730,13 @@ def list_projects():
 
         metadata_path = os.path.join(project_path, "metadata.json")
         project_name = entry
+        film_format = FILM_FORMAT_REGULAR8
         if os.path.exists(metadata_path):
             try:
                 with open(metadata_path, "r", encoding="utf-8") as handle:
                     metadata = json.load(handle)
                 project_name = metadata.get("project_name", project_name)
+                film_format = normalize_film_format(metadata.get('film_format'))
             except Exception:
                 pass
 
@@ -1719,6 +1744,7 @@ def list_projects():
             "name": project_name,
             "safe_name": entry,
             "path": project_path,
+            "film_format": film_format,
         })
 
     return projects
@@ -1815,6 +1841,10 @@ async def run_raw_capture(websocket, num_frames, stop_event):
     if not active_project_path:
         raise RuntimeError("No active project selected")
 
+    film_format = get_project_film_format(active_project_path)
+    super8_mode = film_format == FILM_FORMAT_SUPER8
+    transport_correction_mode = 'observational_disabled' if super8_mode else 'adaptive'
+
     raw_path = os.path.join(active_project_path, "raw")
     debug_path = os.path.join(active_project_path, "debug")
     os.makedirs(raw_path, exist_ok=True)
@@ -1834,6 +1864,7 @@ async def run_raw_capture(websocket, num_frames, stop_event):
     configure_raw_camera()
     applied_camera_settings = apply_raw_capture_camera_controls()
     raw_fast_detector.reset()
+    raw_super8_detector.reset()
     preview_pitch = SPROCKET_PITCH_PX * raw_preview_scale
     raw_tracker = RegistrationTracker(
         expected_sprocket_pitch_px=preview_pitch,
@@ -1858,7 +1889,7 @@ async def run_raw_capture(websocket, num_frames, stop_event):
         max_steps = int(nominal_steps_per_pitch * 1.12)
         project_manifest = load_project_metadata(active_project_path)
         saved_transport_state = None
-        if next_frame_number > 1:
+        if not super8_mode and next_frame_number > 1:
             saved_transport_state = project_manifest.get('transport_calibration_state')
         transport = AdaptiveTransportController(
             base_steps=nominal_steps_per_pitch,
@@ -1880,9 +1911,15 @@ async def run_raw_capture(websocket, num_frames, stop_event):
             bias_warning_interval=int(settings.get('transport_bias_warning_interval', 300)),
             state=saved_transport_state,
         )
-        current_steps = transport.adaptive_base_steps
+        current_steps = nominal_steps_per_pitch if super8_mode else transport.adaptive_base_steps
         initial_transport_diagnostics = transport.diagnostics()
-        project_manifest['transport_calibration'] = initial_transport_diagnostics
+        initial_transport_diagnostics['correction_mode'] = transport_correction_mode
+        project_manifest['film_format'] = film_format
+        project_manifest['transport_correction_mode'] = transport_correction_mode
+        if super8_mode:
+            project_manifest['transport_observation'] = initial_transport_diagnostics
+        else:
+            project_manifest['transport_calibration'] = initial_transport_diagnostics
         save_project_metadata(project_manifest, active_project_path)
         # Crop calibration records the relationship between the picture crop
         # and whichever sprocket pair happened to be visible at that moment.
@@ -1893,7 +1930,8 @@ async def run_raw_capture(websocket, num_frames, stop_event):
         target_y = RAW_PREVIEW_SIZE[1] / 2.0
         print(
             f"[APP] RAW registration controller: target_y={target_y:.2f}, "
-            f"nominal_steps={nominal_steps_per_pitch}, exposure={applied_camera_settings['ExposureTime']}"
+            f"nominal_steps={nominal_steps_per_pitch}, film_format={film_format}, "
+            f"exposure={applied_camera_settings['ExposureTime']}"
         )
         if saved_transport_state and transport.restore_status != 'same_nominal_restored':
             saved_nominal = saved_transport_state.get('configured_nominal_steps', 'missing')
@@ -1906,7 +1944,8 @@ async def run_raw_capture(websocket, num_frames, stop_event):
             "[APP] Transport calibration:\n"
             f"  adaptive base steps: {transport.adaptive_base_steps}\n"
             f"  correction range: {transport.min_correction:+d} .. {transport.max_correction:+d}\n"
-            f"  absolute motor command range: {transport.min_command} .. {transport.max_command}"
+            f"  absolute motor command range: {transport.min_command} .. {transport.max_command}\n"
+            f"  correction mode: {transport_correction_mode}"
         )
         missing_pair_count = 0
         trusted_step_history = deque(maxlen=5)
@@ -1962,73 +2001,92 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                 )
 
                 detection_started = time.perf_counter()
-                sprockets = raw_fast_detector.detect(preview_bgr)
-                fast_failure_reason = raw_fast_detector.last_failure
-                detection_method = "fast"
                 crosscheck_sprockets = None
                 crosscheck_registration_y = None
                 detector_disagreement_px = None
                 crosscheck_mode = None
                 crosscheck_full_count = None
                 crosscheck_partial_count = None
-                if not sprockets:
-                    sprockets = raw_fallback_detector.detect(preview_bgr, mode="profile") or []
-                    detection_method = "fallback" if sprockets else "failed"
-                elif frame_index % 25 == 0 or preview_clip_pct >= 15.0:
-                    crosscheck_sprockets = raw_fallback_detector.detect(
-                        preview_bgr, mode="profile"
-                    ) or []
-                detection_ms = (time.perf_counter() - detection_started) * 1000.0
+                super8_confidence = None
+                super8_threshold = None
+                super8_candidate_count = None
+                super8_viable_count = None
+                if super8_mode:
+                    super8_result = raw_super8_detector.detect_registration(preview_bgr)
+                    sprockets = super8_result['sprockets']
+                    full_sprockets = list(sprockets)
+                    full_count = len(full_sprockets)
+                    partial_count = int(super8_result['partial_count'])
+                    raw_mode = super8_result['mode']
+                    raw_y = super8_result['actual_y']
+                    fast_failure_reason = super8_result['failure_reason']
+                    detection_method = 'super8_bright' if raw_mode == 'direct' else 'super8_failed'
+                    super8_confidence = super8_result['confidence']
+                    super8_threshold = super8_result['threshold']
+                    super8_candidate_count = super8_result['candidate_count']
+                    super8_viable_count = super8_result['viable_count']
+                else:
+                    sprockets = raw_fast_detector.detect(preview_bgr)
+                    fast_failure_reason = raw_fast_detector.last_failure
+                    detection_method = "fast"
+                    if not sprockets:
+                        sprockets = raw_fallback_detector.detect(preview_bgr, mode="profile") or []
+                        detection_method = "fallback" if sprockets else "failed"
+                    elif frame_index % 25 == 0 or preview_clip_pct >= 15.0:
+                        crosscheck_sprockets = raw_fallback_detector.detect(
+                            preview_bgr, mode="profile"
+                        ) or []
 
-                classified = raw_fallback_detector.classify_sprockets(sprockets, preview_bgr.shape)
-                full_sprockets = [
-                    item['sprocket'] for item in classified
-                    if item.get('status') == 'full'
-                ]
-                full_count = len(full_sprockets)
-                partial_count = sum(1 for item in classified if item.get('status') == 'partial')
-                if detection_method == 'fallback' and full_sprockets:
-                    raw_fast_detector.seed(full_sprockets, preview_bgr.shape)
-                raw_registration = raw_fallback_detector.choose_registration(
-                    full_sprockets, preview_bgr.shape, expected_pitch=preview_pitch
-                )
-                raw_mode = raw_registration.get('mode', 'none') if raw_registration else 'none'
-                raw_y = raw_registration.get('actual_y') if raw_registration else None
-
-                if crosscheck_sprockets is not None:
-                    crosscheck_classified = raw_fallback_detector.classify_sprockets(
-                        crosscheck_sprockets, preview_bgr.shape
-                    )
-                    crosscheck_full_sprockets = [
-                        item['sprocket'] for item in crosscheck_classified
+                    classified = raw_fallback_detector.classify_sprockets(sprockets, preview_bgr.shape)
+                    full_sprockets = [
+                        item['sprocket'] for item in classified
                         if item.get('status') == 'full'
                     ]
-                    crosscheck_full_count = len(crosscheck_full_sprockets)
-                    crosscheck_partial_count = sum(
-                        1 for item in crosscheck_classified
-                        if item.get('status') == 'partial'
-                    )
-                    crosscheck_choice = raw_fallback_detector.choose_registration(
-                        crosscheck_full_sprockets,
-                        preview_bgr.shape,
-                        expected_pitch=preview_pitch,
-                    ) or {}
-                    crosscheck_mode = crosscheck_choice.get('mode', 'none')
-                    if crosscheck_mode == 'pair':
-                        crosscheck_registration_y = crosscheck_choice.get('actual_y')
-                if raw_y is not None and crosscheck_registration_y is not None:
-                    detector_disagreement_px = abs(
-                        float(raw_y) - float(crosscheck_registration_y)
-                    )
-                    if detector_disagreement_px > 20.0 and crosscheck_mode == 'pair':
-                        sprockets = crosscheck_full_sprockets
-                        full_sprockets = crosscheck_full_sprockets
-                        full_count = len(full_sprockets)
-                        partial_count = int(crosscheck_partial_count or 0)
-                        raw_mode = 'pair'
-                        raw_y = float(crosscheck_registration_y)
-                        detection_method = 'fallback_validation'
+                    full_count = len(full_sprockets)
+                    partial_count = sum(1 for item in classified if item.get('status') == 'partial')
+                    if detection_method == 'fallback' and full_sprockets:
                         raw_fast_detector.seed(full_sprockets, preview_bgr.shape)
+                    raw_registration = raw_fallback_detector.choose_registration(
+                        full_sprockets, preview_bgr.shape, expected_pitch=preview_pitch
+                    )
+                    raw_mode = raw_registration.get('mode', 'none') if raw_registration else 'none'
+                    raw_y = raw_registration.get('actual_y') if raw_registration else None
+
+                    if crosscheck_sprockets is not None:
+                        crosscheck_classified = raw_fallback_detector.classify_sprockets(
+                            crosscheck_sprockets, preview_bgr.shape
+                        )
+                        crosscheck_full_sprockets = [
+                            item['sprocket'] for item in crosscheck_classified
+                            if item.get('status') == 'full'
+                        ]
+                        crosscheck_full_count = len(crosscheck_full_sprockets)
+                        crosscheck_partial_count = sum(
+                            1 for item in crosscheck_classified
+                            if item.get('status') == 'partial'
+                        )
+                        crosscheck_choice = raw_fallback_detector.choose_registration(
+                            crosscheck_full_sprockets,
+                            preview_bgr.shape,
+                            expected_pitch=preview_pitch,
+                        ) or {}
+                        crosscheck_mode = crosscheck_choice.get('mode', 'none')
+                        if crosscheck_mode == 'pair':
+                            crosscheck_registration_y = crosscheck_choice.get('actual_y')
+                    if raw_y is not None and crosscheck_registration_y is not None:
+                        detector_disagreement_px = abs(
+                            float(raw_y) - float(crosscheck_registration_y)
+                        )
+                        if detector_disagreement_px > 20.0 and crosscheck_mode == 'pair':
+                            sprockets = crosscheck_full_sprockets
+                            full_sprockets = crosscheck_full_sprockets
+                            full_count = len(full_sprockets)
+                            partial_count = int(crosscheck_partial_count or 0)
+                            raw_mode = 'pair'
+                            raw_y = float(crosscheck_registration_y)
+                            detection_method = 'fallback_validation'
+                            raw_fast_detector.seed(full_sprockets, preview_bgr.shape)
+                detection_ms = (time.perf_counter() - detection_started) * 1000.0
                 tracked = raw_tracker.update(
                     raw_registration_y=raw_y,
                     raw_registration_mode=raw_mode,
@@ -2039,105 +2097,137 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                 crop_rect, crop_meta = get_scaled_relative_crop_rect(preview_bgr, registration_y)
 
                 anomaly_reasons = []
-                if detection_method == 'fallback':
-                    anomaly_reasons.append('fast_fallback')
-                elif detection_method == 'failed':
-                    anomaly_reasons.append('both_detectors_failed')
-                if len(sprockets) == 1:
-                    anomaly_reasons.append('single_sprocket')
-                elif len(sprockets) > 2:
-                    anomaly_reasons.append('unexpected_sprocket_count')
-                if partial_count > 0:
-                    anomaly_reasons.append('partial_sprocket')
-                if (
-                    detector_disagreement_px is not None
-                    and detector_disagreement_px > 20.0
-                ):
-                    anomaly_reasons.append('detector_disagreement')
-                if (
-                    crosscheck_sprockets is not None
-                    and crosscheck_mode != 'pair'
-                ):
-                    anomaly_reasons.append('fallback_crosscheck_untrusted')
-                if (
-                    raw_mode == 'pair'
-                    and raw_y is not None
-                    and previous_trusted_pair_y is not None
-                    and abs(float(raw_y) - float(previous_trusted_pair_y)) > 0.22 * preview_pitch
-                ):
-                    anomaly_reasons.append('registration_phase_jump')
-
-                if raw_mode == 'pair':
-                    missing_pair_count = 0
+                if super8_mode:
+                    if detection_method == 'super8_failed':
+                        anomaly_reasons.append('super8_detection_failed')
+                    if partial_count > 0:
+                        anomaly_reasons.append('partial_sprocket')
+                    if super8_viable_count is not None and super8_viable_count > 1:
+                        anomaly_reasons.append('super8_multiple_candidates')
                 else:
-                    missing_pair_count += 1
+                    if detection_method == 'fallback':
+                        anomaly_reasons.append('fast_fallback')
+                    elif detection_method == 'failed':
+                        anomaly_reasons.append('both_detectors_failed')
+                    if len(sprockets) == 1:
+                        anomaly_reasons.append('single_sprocket')
+                    elif len(sprockets) > 2:
+                        anomaly_reasons.append('unexpected_sprocket_count')
+                    if partial_count > 0:
+                        anomaly_reasons.append('partial_sprocket')
+                    if (
+                        detector_disagreement_px is not None
+                        and detector_disagreement_px > 20.0
+                    ):
+                        anomaly_reasons.append('detector_disagreement')
+                    if (
+                        crosscheck_sprockets is not None
+                        and crosscheck_mode != 'pair'
+                    ):
+                        anomaly_reasons.append('fallback_crosscheck_untrusted')
+                    if (
+                        raw_mode == 'pair'
+                        and raw_y is not None
+                        and previous_trusted_pair_y is not None
+                        and abs(float(raw_y) - float(previous_trusted_pair_y)) > 0.22 * preview_pitch
+                    ):
+                        anomaly_reasons.append('registration_phase_jump')
+
+                    if raw_mode == 'pair':
+                        missing_pair_count = 0
+                    else:
+                        missing_pair_count += 1
 
                 steps_before_update = current_steps
                 correction = 0
                 control_result = None
+                observational_correction = None
+                observational_next_steps = None
                 reacquire_attempted = False
                 reacquire_valid = False
                 reacquire_steps = 0
                 reacquire_reason = None
                 reacquire_ms = 0.0
-                next_steps = transport.adaptive_base_steps
+                next_steps = nominal_steps_per_pitch if super8_mode else transport.adaptive_base_steps
                 if raw_y is not None:
                     error_px = float(target_y) - float(raw_y)
-                    update_allowed = (
-                        raw_mode == 'pair'
-                        and full_count >= 2
-                        and partial_count == 0
-                        and 'registration_phase_jump' not in anomaly_reasons
-                        and (
-                            detector_disagreement_px is None
-                            or detector_disagreement_px <= 20.0
-                            or detection_method == 'fallback_validation'
-                        )
-                    )
-                    if update_allowed:
+                    if super8_mode:
                         controlled_error = error_px if abs(error_px) > dead_band_px else 0.0
-                        control_result = transport.update(controlled_error)
-                        correction = control_result.correction
-                        next_steps = control_result.commanded_steps
+                        proportional = (
+                            controlled_error / pixels_per_step
+                            * float(settings.get('transport_correction_gain', 0.25))
+                        )
+                        observational_correction = int(round(proportional))
+                        observational_correction = max(
+                            transport.min_correction,
+                            min(transport.max_correction, observational_correction),
+                        )
+                        observational_next_steps = max(
+                            transport.min_command,
+                            min(
+                                transport.max_command,
+                                nominal_steps_per_pitch + observational_correction,
+                            ),
+                        )
+                        next_steps = nominal_steps_per_pitch
                         current_steps = next_steps
-                        trusted_step_history.append(int(current_steps))
-                        previous_trusted_pair_y = float(raw_y)
-                        if control_result.warning:
-                            saturated_run = max(
-                                transport.negative_saturation_run,
-                                transport.positive_saturation_run,
-                            )
-                            print(
-                                f"[APP] WARNING: sustained transport saturation: frame={frame_number} "
-                                f"correction={correction:+d} limits={transport.min_correction:+d}..{transport.max_correction:+d} "
-                                f"adaptive_base_steps={transport.adaptive_base_steps} "
-                                f"commanded_steps={current_steps} consecutive_frames={saturated_run}"
-                            )
-                        if control_result.bias_warning:
-                            rolling = transport.rolling_statistics()
-                            print(
-                                f"[APP] WARNING: persistent transport bias: frame={frame_number} "
-                                f"window={rolling['sample_count']} median={rolling['median_correction']:+.1f} "
-                                f"negative_share={rolling['negative_share']:.1%} positive_share={rolling['positive_share']:.1%} "
-                                f"range={rolling['min_correction']:+d}..{rolling['max_correction']:+d} "
-                                f"adaptive_base={transport.adaptive_base_steps} nominal={nominal_steps_per_pitch} "
-                                f"integral={transport.integral_steps:+.3f} "
-                                f"correction_limits={transport.min_correction:+d}..{transport.max_correction:+d} "
-                                f"motor_limits={transport.min_command}..{transport.max_command} "
-                                f"status={control_result.bias_warning_status} "
-                                f"adaptation={control_result.adaptation_reason or 'none'}"
-                            )
                     else:
-                        # Do not repeat a corrective command when registration
-                        # is partial or otherwise untrusted.
-                        transport.update(None, trusted=False)
-                        current_steps = next_steps
+                        update_allowed = (
+                            raw_mode == 'pair'
+                            and full_count >= 2
+                            and partial_count == 0
+                            and 'registration_phase_jump' not in anomaly_reasons
+                            and (
+                                detector_disagreement_px is None
+                                or detector_disagreement_px <= 20.0
+                                or detection_method == 'fallback_validation'
+                            )
+                        )
+                        if update_allowed:
+                            controlled_error = error_px if abs(error_px) > dead_band_px else 0.0
+                            control_result = transport.update(controlled_error)
+                            correction = control_result.correction
+                            next_steps = control_result.commanded_steps
+                            current_steps = next_steps
+                            trusted_step_history.append(int(current_steps))
+                            previous_trusted_pair_y = float(raw_y)
+                            if control_result.warning:
+                                saturated_run = max(
+                                    transport.negative_saturation_run,
+                                    transport.positive_saturation_run,
+                                )
+                                print(
+                                    f"[APP] WARNING: sustained transport saturation: frame={frame_number} "
+                                    f"correction={correction:+d} limits={transport.min_correction:+d}..{transport.max_correction:+d} "
+                                    f"adaptive_base_steps={transport.adaptive_base_steps} "
+                                    f"commanded_steps={current_steps} consecutive_frames={saturated_run}"
+                                )
+                            if control_result.bias_warning:
+                                rolling = transport.rolling_statistics()
+                                print(
+                                    f"[APP] WARNING: persistent transport bias: frame={frame_number} "
+                                    f"window={rolling['sample_count']} median={rolling['median_correction']:+.1f} "
+                                    f"negative_share={rolling['negative_share']:.1%} positive_share={rolling['positive_share']:.1%} "
+                                    f"range={rolling['min_correction']:+d}..{rolling['max_correction']:+d} "
+                                    f"adaptive_base={transport.adaptive_base_steps} nominal={nominal_steps_per_pitch} "
+                                    f"integral={transport.integral_steps:+.3f} "
+                                    f"correction_limits={transport.min_correction:+d}..{transport.max_correction:+d} "
+                                    f"motor_limits={transport.min_command}..{transport.max_command} "
+                                    f"status={control_result.bias_warning_status} "
+                                    f"adaptation={control_result.adaptation_reason or 'none'}"
+                                )
+                        else:
+                            # Do not repeat a corrective command when registration
+                            # is partial or otherwise untrusted.
+                            transport.update(None, trusted=False)
+                            current_steps = next_steps
                 else:
                     error_px = None
-                    transport.update(None, trusted=False)
+                    if not super8_mode:
+                        transport.update(None, trusted=False)
                     current_steps = next_steps
 
-                if missing_pair_count >= 3:
+                if not super8_mode and missing_pair_count >= 3:
                     reacquire_attempted = True
                     anomaly_reasons.append('reacquisition')
                     reacquire_started = time.perf_counter()
@@ -2165,7 +2255,7 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                 preview_bytes = encoded.tobytes()
                 encode_ms = (time.perf_counter() - encode_started) * 1000.0
 
-                if detection_method != 'fast' and not fast_diagnostic_saved:
+                if not super8_mode and detection_method != 'fast' and not fast_diagnostic_saved:
                     with open(fast_diagnostic_path, 'wb') as handle:
                         handle.write(preview_bytes)
                     fast_diagnostic_saved = True
@@ -2194,6 +2284,7 @@ async def run_raw_capture(websocket, num_frames, stop_event):
 
                 frame_metadata = {
                     'protocol': RAW_CAPTURE_MODE,
+                    'film_format': film_format,
                     'frame_index': frame_index,
                     'frame_number': frame_number,
                     'saved_frame_path': dng_path,
@@ -2223,6 +2314,7 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                     'sprockets': [[float(value) for value in item] for item in sprockets],
                     'raw_registration_mode': raw_mode,
                     'raw_registration_y': float(raw_y) if raw_y is not None else None,
+                    'direct_registration_y': tracked.get('direct_registration_y'),
                     'selected_registration_y': registration_y,
                     'selected_source': tracked.get('selected_source'),
                     'crop_clamped': bool(crop_meta.get('crop_clamped')),
@@ -2232,6 +2324,9 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                     'adaptive_base_steps': int(transport.adaptive_base_steps),
                     'transport_integral_steps': round(float(transport.integral_steps), 4),
                     'configured_nominal_steps': int(nominal_steps_per_pitch),
+                    'transport_correction_mode': transport_correction_mode,
+                    'observational_correction': observational_correction,
+                    'observational_next_steps': observational_next_steps,
                     'transport_rolling_sample_count': len(transport.correction_window),
                     'transport_rolling_median_correction': transport.rolling_statistics()['median_correction'],
                     'transport_rolling_negative_share': transport.rolling_statistics()['negative_share'],
@@ -2241,6 +2336,10 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                     'transport_active_constraint': control_result.active_constraint if control_result else 'neither',
                     'correction': int(correction),
                     'next_steps': int(current_steps),
+                    'super8_confidence': super8_confidence,
+                    'super8_threshold': super8_threshold,
+                    'super8_candidate_count': super8_candidate_count,
+                    'super8_viable_count': super8_viable_count,
                     'reacquire_attempted': reacquire_attempted,
                     'reacquire_valid': reacquire_valid,
                     'reacquire_steps': reacquire_steps,
@@ -2260,7 +2359,7 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                     'discarded_stale_requests': int(discarded_requests),
                 }
                 append_registration_metadata(metadata_path, frame_metadata)
-                if frame_index % 10 == 0:
+                if not super8_mode and frame_index % 10 == 0:
                     project_manifest = load_project_metadata(active_project_path)
                     project_manifest['transport_calibration_state'] = transport.state()
                     project_manifest['transport_calibration'] = transport.diagnostics()
@@ -2292,10 +2391,16 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                     if raw_y is not None and error_px is not None else
                     f"reg=n/a target={target_y:.1f} err=n/a"
                 )
+                transport_observation_log = (
+                    f"observed_correction={observational_correction:+d} "
+                    f"observed_next={observational_next_steps}; "
+                    if observational_correction is not None else ""
+                )
                 print(
                     f"[APP] RAW frame {frame_number}: {detection_method}, {registration_log} "
                     f"steps={steps_before_update} "
                     f"base={transport.adaptive_base_steps} correction={correction:+d} next={current_steps}; "
+                    f"{transport_observation_log}"
                     f"discarded={discarded_requests} detect={detection_ms:.1f}ms "
                     f"dng_write={dng_write_ms:.1f}ms reacquire={reacquire_ms:.1f}ms "
                     f"total={total_ms:.1f}ms anomalies={','.join(anomaly_reasons) or 'none'}"
@@ -2310,16 +2415,28 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                     request.release()
 
         project_manifest = load_project_metadata(active_project_path)
-        project_manifest['transport_calibration_state'] = transport.state()
-        project_manifest['transport_calibration'] = transport.diagnostics()
+        final_transport_diagnostics = transport.diagnostics()
+        final_transport_diagnostics['correction_mode'] = transport_correction_mode
+        if super8_mode:
+            project_manifest['transport_observation'] = final_transport_diagnostics
+        else:
+            project_manifest['transport_calibration_state'] = transport.state()
+            project_manifest['transport_calibration'] = final_transport_diagnostics
         save_project_metadata(project_manifest, active_project_path)
         append_registration_metadata(metadata_path, {
-            'event': 'transport_calibration_summary',
-            **transport.diagnostics(),
+            'event': (
+                'transport_observation_summary'
+                if super8_mode else 'transport_calibration_summary'
+            ),
+            'film_format': film_format,
+            'transport_correction_mode': transport_correction_mode,
+            **final_transport_diagnostics,
         })
         await websocket.send(json.dumps({
             'event': 'capture_complete',
             'capture_mode': RAW_CAPTURE_MODE,
+            'film_format': film_format,
+            'transport_correction_mode': transport_correction_mode,
             'anomaly_count': anomaly_count,
             'anomaly_path': anomaly_path,
             'metadata_path': metadata_path,
@@ -2766,7 +2883,10 @@ async def handle_client(websocket):
                     continue
 
                 try:
-                    project_info = create_or_select_project(data.get('name', ''))
+                    project_info = create_or_select_project(
+                        data.get('name', ''),
+                        film_format=data.get('film_format'),
+                    )
                     if not (focus_task and not focus_task.done()) and not (camera_calibration_task and not camera_calibration_task.done()):
                         apply_project_capture_camera_settings(project_info['path'], prefer_saved=True)
                     print(f"[APP] Active project set: {project_info['name']} ({project_info['path']})")
@@ -2778,6 +2898,7 @@ async def handle_client(websocket):
                         'frames_path': project_info['frames_path'],
                         'debug_path': project_info['debug_path'],
                         'metadata_path': project_info['metadata_path'],
+                        'film_format': project_info['film_format'],
                     }))
                 except Exception as exc:
                     print(f"[APP] Create project failed: {exc}")
@@ -2795,6 +2916,10 @@ async def handle_client(websocket):
                         'active_project_name': active_project_name,
                         'active_project_safe_name': active_project_safe_name,
                         'active_project_path': active_project_path,
+                        'active_project_film_format': (
+                            get_project_film_format(active_project_path)
+                            if active_project_path else None
+                        ),
                     }))
                 except Exception as exc:
                     print(f"[APP] List projects failed: {exc}")

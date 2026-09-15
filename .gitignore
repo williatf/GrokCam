@@ -5,3 +5,6 @@ __pycache__/
 # Local machine config
 calibration.json
 config.json
+
+# Proof-of-concept experiments
+experiments/

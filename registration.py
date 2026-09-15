@@ -27,11 +27,12 @@ class RegistrationTracker:
             self.expected_sprocket_pitch_px = float(expected_sprocket_pitch_px)
 
         self.frame_index = int(frame_index) if frame_index is not None else (self.frame_index + 1)
-        raw_mode = raw_registration_mode if raw_registration_mode in ("pair", "single") else "none"
+        raw_mode = raw_registration_mode if raw_registration_mode in ("pair", "single", "direct") else "none"
         raw_y = float(raw_registration_y) if raw_registration_y is not None else None
         reference_y = self.predicted_y()
         raw_pair_midpoint_y = raw_y if raw_mode == "pair" else None
         single_sprocket_y = raw_y if raw_mode == "single" else None
+        direct_registration_y = raw_y if raw_mode == "direct" else None
         selected_y = None
         selected_source = None
         registration_error_px = None
@@ -47,6 +48,16 @@ class RegistrationTracker:
             self.failure_count = 0
             if reference_y is not None:
                 registration_error_px = float(raw_pair_midpoint_y) - float(reference_y)
+
+        elif direct_registration_y is not None:
+            if self.baseline_registration_y is None:
+                self.baseline_registration_y = float(direct_registration_y)
+            self.last_good_registration_y = float(direct_registration_y)
+            selected_y = float(direct_registration_y)
+            selected_source = "direct_actual"
+            self.failure_count = 0
+            if reference_y is not None:
+                registration_error_px = float(direct_registration_y) - float(reference_y)
 
         elif single_sprocket_y is not None:
             if reference_y is not None:
@@ -95,6 +106,7 @@ class RegistrationTracker:
             "raw_registration_mode": raw_mode,
             "raw_pair_midpoint_y": raw_pair_midpoint_y,
             "single_sprocket_y": single_sprocket_y,
+            "direct_registration_y": direct_registration_y,
             "baseline_registration_y": float(self.baseline_registration_y) if self.baseline_registration_y is not None else None,
             "selected_registration_y": float(selected_y) if selected_y is not None else None,
             "last_good_registration_y": float(self.last_good_registration_y) if self.last_good_registration_y is not None else None,
