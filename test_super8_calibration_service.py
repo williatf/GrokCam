@@ -38,6 +38,7 @@ class Super8CalibrationServiceTests(unittest.IsolatedAsyncioTestCase):
             return object(), candidates
 
         service._capture_candidates = capture_candidates
+        service._encode_tracking_preview = lambda *args: b'jpeg-preview'
         progress_events = []
 
         async def record_progress(progress):
@@ -56,6 +57,15 @@ class Super8CalibrationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(result['total_motor_steps'], 150)
         self.assertTrue(any(event['progress_units'] > 0 for event in progress_events))
         self.assertEqual(progress_events[-1]['target_progress_units'], 6)
+        preview_events = [
+            event for event in progress_events if 'preview_jpeg' in event
+        ]
+        self.assertGreater(len(preview_events), 1)
+        self.assertLess(len(preview_events), len(progress_events))
+        self.assertEqual(preview_events[0]['preview_reason'], 'initial')
+        self.assertTrue(all(
+            event['preview_jpeg'] == b'jpeg-preview' for event in preview_events
+        ))
 
 
 if __name__ == '__main__':

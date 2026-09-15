@@ -3367,6 +3367,8 @@ async def handle_client(websocket):
                         )
 
                         async def send_super8_calibration_progress(progress):
+                            progress = dict(progress)
+                            preview_jpeg = progress.pop('preview_jpeg', None)
                             await websocket.send(json.dumps({
                                 'event': 'calibration_sweep_progress',
                                 'phase': 'tracking',
@@ -3377,6 +3379,20 @@ async def handle_client(websocket):
                                 'calibration_destination': calibration_destination,
                                 **progress,
                             }))
+                            if preview_jpeg is not None:
+                                await websocket.send(json.dumps({
+                                    'event': 'calibration_sweep_sample',
+                                    'film_format': film_format,
+                                    'calibration_mode': calibration_mode,
+                                    'calibration_destination': calibration_destination,
+                                    'sample': progress['total_motor_steps'],
+                                    'sprocket_count': progress['complete_candidates'],
+                                    'sprocket_pitch_px': None,
+                                    'sprocket_area_nominal': None,
+                                    **progress,
+                                    'size': len(preview_jpeg),
+                                }))
+                                await websocket.send(preview_jpeg)
 
                         calibration_result = await calibration_context[
                             'service'
@@ -3386,6 +3402,7 @@ async def handle_client(websocket):
                             max_steps_per_transition=500,
                             settle_delay=0.05,
                             progress_callback=send_super8_calibration_progress,
+                            debug_scale=debug_scale,
                         )
                         result_measurements = calibration_result.get(
                             'measurements', {}
