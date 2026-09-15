@@ -19,6 +19,7 @@ from calibration_dispatch import (
 from fast_sprocket import FastSprocketDetector
 from super8_detector import Super8Detector
 from super8_calibration_service import Super8CalibrationService
+from super8_calibration_result import build_super8_client_summary
 from film_calibration import (
     FILM_FORMAT_REGULAR8,
     FILM_FORMAT_SUPER8,
@@ -3389,6 +3390,9 @@ async def handle_client(websocket):
                         result_measurements = calibration_result.get(
                             'measurements', {}
                         )
+                        super8_client_summary = build_super8_client_summary(
+                            calibration_result, target_transitions
+                        )
                         print(
                             '[APP] Super 8 calibration result: '
                             f"valid={calibration_result.get('valid')} "
@@ -3433,14 +3437,14 @@ async def handle_client(websocket):
                                     f'{save_block_reason}'
                                 ),
                                 'reason': save_block_reason,
-                                'summary': calibration_result,
+                                'summary': super8_client_summary,
                             }))
                         await websocket.send(json.dumps({
                             'event': 'calibration_sweep_complete',
                             'film_format': film_format,
                             'calibration_mode': calibration_mode,
                             'calibration_destination': calibration_destination,
-                            'summary': calibration_result,
+                            'summary': super8_client_summary,
                             'proposed_calibration': proposed_calibration,
                             'can_save': can_save,
                             'save_block_reason': save_block_reason,

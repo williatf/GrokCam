@@ -133,6 +133,7 @@ class Super8PerforationTracker:
         self.detector_loss_frames = 0
         self.pitch_observations = []
         self.confidences = []
+        self.areas = []
 
     def update(self, candidates, cumulative_steps):
         steps = float(cumulative_steps)
@@ -318,6 +319,7 @@ class Super8PerforationTracker:
             'steps_per_pitch_values': transition_values,
             'steps_per_pitch': transition_summary,
             'confidence': summarize(self.confidences),
+            'area': summarize(self.areas),
             'tracks': tracks_payload,
             'ambiguous_track_count': self.ambiguous_frames,
             'rejected_track_count': self.rejected_assignments,
@@ -353,6 +355,7 @@ class Super8PerforationTracker:
 
     def _record_frame_measurements(self, observations):
         self.confidences.extend(item.score for item in observations)
+        self.areas.extend(item.area for item in observations)
         for upper, lower in zip(observations, observations[1:]):
             self.pitch_observations.append(lower.center_y - upper.center_y)
 
