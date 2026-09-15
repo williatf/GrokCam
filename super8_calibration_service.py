@@ -3,9 +3,6 @@
 import asyncio
 import io
 
-import cv2
-import numpy as np
-
 from calibration_persistence import save_calibration_atomic
 from super8_calibration_result import build_super8_calibration_proposal
 from super8_calibration_tracker import Super8PerforationTracker
@@ -34,6 +31,8 @@ class Super8CalibrationService:
         self.search_steps_per_pitch = search_steps_per_pitch
 
     def capture_calibration_preview(self, debug_scale=1.0):
+        import cv2
+
         frame = self._capture_jpeg_frame()
         if frame is None:
             raise RuntimeError('Failed to decode Super 8 calibration preview')
@@ -150,19 +149,28 @@ class Super8CalibrationService:
 
             measurements = tracker.measurements()
             transitions = measurements['steps_per_pitch']['count']
+            crossings = measurements['crossings']
+            if crossings:
+                latest_crossing = max(
+                    crossing['steps'] for crossing in crossings
+                )
+                last_transition_steps = max(last_transition_steps, latest_crossing)
+            progress_fraction = min(
+                0.99,
+                max(0.0, total_steps - last_transition_steps)
+                / max_steps_per_transition,
+            )
             if progress_callback is not None:
                 await progress_callback({
                     'completed_transitions': transitions,
+                    'observed_crossings': len(crossings),
                     'target_transitions': target_transitions,
+                    'progress_units': len(crossings) + progress_fraction,
+                    'target_progress_units': target_transitions + 1,
                     'total_motor_steps': total_steps,
                     'complete_candidates': len(candidates),
                     'track_count': len(tracker.tracks),
                 })
-            if transitions:
-                latest_crossing = max(
-                    crossing['steps'] for crossing in measurements['crossings']
-                )
-                last_transition_steps = max(last_transition_steps, latest_crossing)
             if transitions >= target_transitions:
                 return self._completed_result(
                     tracker, total_steps, rejected_trials, target_transitions
@@ -229,6 +237,9 @@ class Super8CalibrationService:
         ]
 
     def _capture_jpeg_frame(self):
+        import cv2
+        import numpy as np
+
         buffer = io.BytesIO()
         self.camera.capture_file(buffer, format='jpeg')
         return cv2.imdecode(
@@ -245,6 +256,8 @@ class Super8CalibrationService:
 
     @staticmethod
     def _draw_candidate(frame, candidate):
+        import cv2
+
         cx = float(candidate['center_x'])
         cy = float(candidate['center_y'])
         width = float(candidate['width'])

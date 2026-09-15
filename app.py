@@ -3351,7 +3351,7 @@ async def handle_client(websocket):
                             'event': 'calibration_sweep_progress',
                             'phase': 'starting',
                             'completed': 0,
-                            'total': target_transitions,
+                            'total': target_transitions + 1,
                             'film_format': film_format,
                             'calibration_mode': calibration_mode,
                             'calibration_destination': calibration_destination,
@@ -3369,8 +3369,8 @@ async def handle_client(websocket):
                             await websocket.send(json.dumps({
                                 'event': 'calibration_sweep_progress',
                                 'phase': 'tracking',
-                                'completed': progress['completed_transitions'],
-                                'total': progress['target_transitions'],
+                                'completed': progress['progress_units'],
+                                'total': progress['target_progress_units'],
                                 'film_format': film_format,
                                 'calibration_mode': calibration_mode,
                                 'calibration_destination': calibration_destination,
@@ -3385,6 +3385,17 @@ async def handle_client(websocket):
                             max_steps_per_transition=500,
                             settle_delay=0.05,
                             progress_callback=send_super8_calibration_progress,
+                        )
+                        result_measurements = calibration_result.get(
+                            'measurements', {}
+                        )
+                        print(
+                            '[APP] Super 8 calibration result: '
+                            f"valid={calibration_result.get('valid')} "
+                            f"reason={calibration_result.get('reason')} "
+                            f"steps={calibration_result.get('total_motor_steps')} "
+                            f"crossings={len(result_measurements.get('crossings', []))} "
+                            f"transitions={result_measurements.get('steps_per_pitch', {}).get('count', 0)}"
                         )
                         if calibration_result.get('valid'):
                             proposed_calibration, can_save, save_block_reason = (
@@ -3412,6 +3423,18 @@ async def handle_client(websocket):
                             )
                         latest_can_save = can_save
                         latest_save_block_reason = save_block_reason
+                        if not calibration_result.get('valid'):
+                            await websocket.send(json.dumps({
+                                'event': 'calibration_error',
+                                'film_format': film_format,
+                                'calibration_mode': calibration_mode,
+                                'message': (
+                                    'Super 8 calibration stopped: '
+                                    f'{save_block_reason}'
+                                ),
+                                'reason': save_block_reason,
+                                'summary': calibration_result,
+                            }))
                         await websocket.send(json.dumps({
                             'event': 'calibration_sweep_complete',
                             'film_format': film_format,
