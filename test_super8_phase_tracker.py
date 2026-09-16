@@ -19,6 +19,7 @@ class Super8PhaseTrackerTests(unittest.TestCase):
     def tracker(self):
         return Super8PhaseTracker(
             pixels_per_step=1.0,
+            expected_sprocket_pitch_px=20.0,
             preview_size=(760, 570),
             motion_direction=-1,
         )
@@ -26,22 +27,22 @@ class Super8PhaseTrackerTests(unittest.TestCase):
     def test_normal_phase_continuity_uses_applied_steps(self):
         tracker = self.tracker()
         self.assertTrue(tracker.update([self.candidate(500)], 0).trusted)
-        result = tracker.update([self.candidate(480), self.candidate(200)], 20)
+        result = tracker.update([self.candidate(500), self.candidate(200)], 20)
         self.assertTrue(result.trusted)
-        self.assertEqual(result.selected_y, 480)
-        self.assertAlmostEqual(result.predicted_y, 480)
+        self.assertEqual(result.selected_y, 500)
+        self.assertAlmostEqual(result.predicted_y, 500)
 
     def test_adjacent_hole_is_rejected_by_phase_gate(self):
         tracker = self.tracker()
         tracker.update([self.candidate(500)], 0)
-        result = tracker.update([self.candidate(449)], 20)
+        result = tracker.update([self.candidate(820)], 20)
         self.assertFalse(result.trusted)
         self.assertEqual(result.reason, 'candidate_outside_phase_gate')
 
     def test_close_candidates_are_ambiguous(self):
         tracker = self.tracker()
         tracker.update([self.candidate(500)], 0)
-        result = tracker.update([self.candidate(480), self.candidate(486)], 20)
+        result = tracker.update([self.candidate(500), self.candidate(506)], 20)
         self.assertFalse(result.trusted)
         self.assertEqual(result.reason, 'ambiguous_phase')
         self.assertAlmostEqual(result.ambiguity_px, 6.0)
@@ -49,20 +50,101 @@ class Super8PhaseTrackerTests(unittest.TestCase):
     def test_loss_requires_three_frame_controlled_reseed(self):
         tracker = self.tracker()
         tracker.update([self.candidate(500)], 0)
-        for steps in (20, 40, 60):
+        for steps in (20, 20, 20):
             result = tracker.update([], steps)
             self.assertFalse(result.trusted)
         self.assertEqual(result.loss_count, 3)
 
         self.assertEqual(
-            tracker.update([self.candidate(300)], 80).reason,
+            tracker.update([self.candidate(300)], 20).reason,
             'reseed_started',
         )
-        self.assertFalse(tracker.update([self.candidate(290)], 90).trusted)
+        self.assertFalse(tracker.update([self.candidate(300)], 20).trusted)
         self.assertTrue(
-            tracker.update([self.candidate(280)], 100).trusted
+            tracker.update([self.candidate(300)], 20).trusted
         )
         self.assertEqual(tracker.reseed_count, 1)
+
+    def test_untrusted_frame_advances_prediction_without_accumulating_steps(self):
+        tracker = self.tracker()
+        tracker.update([self.candidate(500)], 20)
+        lost = tracker.update([], 20)
+        self.assertFalse(lost.trusted)
+        recovered = tracker.update([self.candidate(500)], 20)
+        self.assertTrue(recovered.trusted)
+        self.assertAlmostEqual(recovered.predicted_y, 500.0)
+
+    def test_formal_calibration_nominal_residual_is_about_point_54_px(self):
+        from film_calibration import load_film_calibration, resolve_raw_preview_transport
+
+        calibration = load_film_calibration('super8')
+        geometry = resolve_raw_preview_transport(calibration, (760, 570))
+        tracker = Super8PhaseTracker(
+            pixels_per_step=geometry['preview_pixels_per_step'],
+            expected_sprocket_pitch_px=geometry['preview_sprocket_pitch_px'],
+            preview_size=(760, 570),
+            motion_direction=-1,
+        )
+        seed_y = 198.7868747
+        expected_y = seed_y + (
+            308 * geometry['preview_pixels_per_step']
+            - geometry['preview_sprocket_pitch_px']
+        )
+        tracker.update([self.candidate(seed_y)], 308)
+        result = tracker.update([self.candidate(expected_y)], 308)
+        self.assertTrue(result.trusted)
+        self.assertAlmostEqual(result.predicted_y, 199.3276, places=3)
+        self.assertAlmostEqual(
+            result.error_px, 0.0, places=3,
+        )
+
+    def test_adjacent_hole_transition_is_rejected_but_equivalent_candidate_tracks(self):
+        tracker = self.tracker()
+        tracker.update([self.candidate(200)], 20)
+        result = tracker.update(
+            [self.candidate(200), self.candidate(520, score=0.99)], 20
+        )
+        self.assertTrue(result.trusted)
+        self.assertEqual(result.selected_y, 200)
+        result = tracker.update([self.candidate(520)], 20)
+        self.assertFalse(result.trusted)
+        self.assertEqual(result.reason, 'candidate_outside_phase_gate')
+
+    def test_repeated_nominal_steps_do_not_accumulate_as_cumulative_motion(self):
+        tracker = Super8PhaseTracker(
+            pixels_per_step=1.0407885250801314,
+            expected_sprocket_pitch_px=320.02211234782806,
+            preview_size=(760, 570),
+            motion_direction=-1,
+        )
+        y = 198.7868747
+        self.assertTrue(tracker.update([self.candidate(y)], 308).trusted)
+        for _ in range(99):
+            y += 308 * 1.0407885250801314 - 320.02211234782806
+            result = tracker.update([self.candidate(y)], 308)
+            self.assertTrue(result.trusted)
+        self.assertLess(abs(result.predicted_y - y), 1e-6)
+
+    def test_frames_45_to_50_choose_equivalent_phase_candidates(self):
+        tracker = Super8PhaseTracker(
+            pixels_per_step=1.0407885250801314,
+            expected_sprocket_pitch_px=320.02211234782806,
+            preview_size=(760, 570),
+            motion_direction=-1,
+        )
+        tracker.update([self.candidate(407.0)], 308)
+        raw_values = (413.42, 98.64, 421.85, 421.75, 421.96, 101.06)
+        for raw_y in raw_values:
+            candidates = [self.candidate(raw_y)]
+            equivalent_y = raw_y + 320.02211234782806
+            if equivalent_y <= 570:
+                candidates.append(self.candidate(equivalent_y, score=0.5))
+            equivalent_y = raw_y - 320.02211234782806
+            if equivalent_y >= 0:
+                candidates.append(self.candidate(equivalent_y, score=0.5))
+            result = tracker.update(candidates, 308)
+            self.assertTrue(result.trusted)
+            self.assertLess(abs(result.selected_y - result.predicted_y), 30.0)
 
 
 if __name__ == '__main__':

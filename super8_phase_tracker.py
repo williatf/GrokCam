@@ -32,15 +32,20 @@ class PhaseResult:
 class Super8PhaseTracker:
     """Associate detector candidates with the expected physical phase.
 
-    ``cumulative_steps`` is the number of motor steps actually applied before
-    the current preview.  The sign is fixed by the calibrated preview
-    geometry: forward Super 8 transport moves the image upward.
+    ``applied_steps`` is the number of motor steps actually applied for the
+    transport interval immediately before the current preview.  The tracker
+    associates equivalent perforation phase, so a full sprocket pitch is
+    removed from that transport before predicting the next Y position.
     """
 
-    def __init__(self, pixels_per_step, preview_size, gate_px=30.0,
+    def __init__(self, pixels_per_step, expected_sprocket_pitch_px,
+                 preview_size, gate_px=30.0,
                  ambiguity_margin_px=8.0, motion_direction=-1,
                  reseed_after_loss=3, reseed_confirmations=3):
         self.pixels_per_step = float(pixels_per_step)
+        self.expected_sprocket_pitch_px = float(expected_sprocket_pitch_px)
+        if self.pixels_per_step <= 0 or self.expected_sprocket_pitch_px <= 0:
+            raise ValueError('phase geometry must be positive')
         self.preview_size = tuple(int(value) for value in preview_size)
         self.gate_px = float(gate_px)
         self.ambiguity_margin_px = float(ambiguity_margin_px)
@@ -51,23 +56,23 @@ class Super8PhaseTracker:
 
     def reset(self):
         self.last_y = None
-        self.last_steps = None
+        self.predicted_y = None
         self.loss_count = 0
         self.reseed_count = 0
         self._reseed_observations = []
 
-    def update(self, candidates, cumulative_steps):
+    def update(self, candidates, applied_steps):
         candidates = list(candidates or [])
-        steps = float(cumulative_steps)
-        if self.last_steps is not None and steps < self.last_steps:
-            return self._lost('motor_steps_moved_backwards', len(candidates), steps)
+        steps = float(applied_steps)
+        if steps < 0:
+            return self._lost('motor_steps_negative', len(candidates), steps)
 
         if self.last_y is None:
             if not candidates:
                 return self._lost('no_complete_candidates', 0, steps)
             selected = max(candidates, key=lambda item: float(item.get('score', 0.0)))
             self.last_y = float(selected['center_y'])
-            self.last_steps = steps
+            self.predicted_y = self.last_y
             self.loss_count = 0
             return self._result(True, 'seeded', selected_y=self.last_y,
                                 candidate_count=len(candidates))
@@ -76,32 +81,37 @@ class Super8PhaseTracker:
             # A lost phase is deliberately not recovered from one lucky hole.
             # Start a new controlled sequence, then require confirmations.
             selected = max(candidates, key=lambda item: float(item.get('score', 0.0)))
-            self.last_y = float(selected['center_y'])
-            self.last_steps = steps
-            self._reseed_observations = [(steps, self.last_y)]
-            return self._result(False, 'reseed_started', selected_y=self.last_y,
+            selected_y = float(selected['center_y'])
+            self._reseed_observations = [(selected_y,)]
+            return self._result(False, 'reseed_started', selected_y=selected_y,
                                 candidate_count=len(candidates))
 
-        predicted = self._predict(steps)
+        if self._reseed_observations:
+            predicted = self._reseed_predict(steps)
+        else:
+            predicted = self._predict(steps)
         ranked = sorted(
             ((abs(float(item['center_y']) - predicted), item) for item in candidates),
             key=lambda pair: pair[0],
         )
         if not ranked or ranked[0][0] > self.gate_px:
+            if self._reseed_observations:
+                self._reseed_observations = []
             return self._lost('candidate_outside_phase_gate' if ranked else
                               'no_complete_candidates', len(candidates), steps,
                               predicted_y=predicted)
         if len(ranked) > 1:
             ambiguity = ranked[1][0] - ranked[0][0]
             if ambiguity < self.ambiguity_margin_px:
+                if self._reseed_observations:
+                    self._reseed_observations = []
                 return self._lost('ambiguous_phase', len(candidates), steps,
                                   predicted_y=predicted, ambiguity_px=ambiguity)
 
         selected_y = float(ranked[0][1]['center_y'])
         if self._reseed_observations:
-            self._reseed_observations.append((steps, selected_y))
+            self._reseed_observations.append((selected_y,))
             if len(self._reseed_observations) < self.reseed_confirmations:
-                self.last_steps = steps
                 return self._result(False, 'reseed_confirming', selected_y=selected_y,
                                     predicted_y=predicted, error_px=selected_y - predicted,
                                     candidate_count=len(candidates))
@@ -112,15 +122,27 @@ class Super8PhaseTracker:
             reason = 'tracked'
 
         self.last_y = selected_y
-        self.last_steps = steps
+        self.predicted_y = selected_y
         self.loss_count = 0
         return self._result(True, reason, selected_y=selected_y,
                             predicted_y=predicted, error_px=selected_y - predicted,
                             candidate_count=len(candidates))
 
     def _predict(self, steps):
-        delta_steps = max(0.0, steps - self.last_steps)
-        return self.last_y + self.motion_direction * delta_steps * self.pixels_per_step
+        return self._advance(self.predicted_y, steps)
+
+    def _reseed_predict(self, steps):
+        return self._advance(self._reseed_observations[-1][0], steps)
+
+    def _advance(self, y, applied_steps):
+        # Equivalent phase advances by the difference between the applied
+        # transport and one calibrated sprocket pitch.  With the production
+        # direction (-1), nominal 308 steps therefore predict about +0.54 px.
+        residual_transport = (
+            float(applied_steps) * self.pixels_per_step
+            - self.expected_sprocket_pitch_px
+        )
+        return float(y) - self.motion_direction * residual_transport
 
     def _lost(self, reason, candidate_count, steps, predicted_y=None,
               ambiguity_px=None):

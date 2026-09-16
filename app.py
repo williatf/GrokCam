@@ -1709,6 +1709,7 @@ async def run_raw_capture(websocket, num_frames, stop_event):
     )
     phase_tracker = Super8PhaseTracker(
         pixels_per_step=pixels_per_step,
+        expected_sprocket_pitch_px=preview_pitch,
         preview_size=RAW_PREVIEW_SIZE,
     ) if super8_mode else None
 
@@ -1858,7 +1859,7 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                     sprockets = super8_result['sprockets']
                     phase_result = phase_tracker.update(
                         super8_candidates,
-                        cumulative_motor_steps,
+                        current_steps,
                     )
                     phase = phase_result.as_dict()
                     phase.update({
