@@ -18,7 +18,10 @@ from calibration_dispatch import (
 )
 from fast_sprocket import FastSprocketDetector
 from super8_detector import Super8Detector
-from super8_phase_tracker import Super8PhaseTracker
+from super8_phase_tracker import (
+    Super8PhaseTracker,
+    select_super8_crop_guidance,
+)
 from super8_calibration_service import Super8CalibrationService
 from super8_calibration_result import build_super8_client_summary
 from film_calibration import (
@@ -1766,7 +1769,9 @@ async def run_raw_capture(websocket, num_frames, stop_event):
         # It is not a safe transport target: the saved value can put the upper
         # hole at the preview boundary, where a few pixels of normal variation
         # turn a pair into a partial/single detection. Keep transport centered;
-        # the crop remains registration-relative and follows the detected pair.
+        # the crop remains registration-relative. Super 8 uses trusted phase
+        # or bounded display-only phase guidance; transport still uses only
+        # trusted phase measurements.
         target_y = RAW_PREVIEW_SIZE[1] / 2.0
         print(
             f"[APP] RAW registration controller: target_y={target_y:.2f}, "
@@ -1791,6 +1796,7 @@ async def run_raw_capture(websocket, num_frames, stop_event):
         missing_pair_count = 0
         trusted_step_history = deque(maxlen=5)
         previous_trusted_pair_y = None
+        last_safe_crop_center_y = None
         anomaly_count = 0
 
         for frame_index in range(1, int(num_frames) + 1):
@@ -1952,13 +1958,46 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                     expected_sprocket_pitch_px=preview_pitch,
                 )
                 registration_y = tracked.get('stable_registration_y')
-                crop_rect, crop_meta = get_scaled_relative_crop_rect(
-                    preview_bgr,
-                    registration_y,
-                    center_on_registration=(
-                        super8_mode and phase_result.trusted
-                    ),
-                )
+                crop_guidance = None
+                if super8_mode:
+                    crop_guidance = select_super8_crop_guidance(
+                        phase_result,
+                        last_safe_center_y=last_safe_crop_center_y,
+                    )
+                    crop_center_y = crop_guidance['center_y']
+                    if crop_center_y is not None:
+                        crop_rect, crop_meta = get_scaled_relative_crop_rect(
+                            preview_bgr,
+                            crop_center_y,
+                            center_on_registration=True,
+                        )
+                        if crop_guidance['source'] == 'predicted_phase' and crop_meta.get('crop_clamped'):
+                            crop_guidance = select_super8_crop_guidance(
+                                phase_result,
+                                last_safe_center_y=last_safe_crop_center_y,
+                                max_prediction_age=0,
+                            )
+                            crop_center_y = crop_guidance['center_y']
+                            crop_rect, crop_meta = get_scaled_relative_crop_rect(
+                                preview_bgr,
+                                crop_center_y,
+                                center_on_registration=True,
+                            )
+                    else:
+                        crop_rect, crop_meta = get_scaled_relative_crop_rect(
+                            preview_bgr,
+                            None,
+                            center_on_registration=False,
+                        )
+                    if crop_guidance['valid'] and not crop_meta.get('crop_clamped'):
+                        last_safe_crop_center_y = crop_center_y
+                else:
+                    crop_rect, crop_meta = get_scaled_relative_crop_rect(
+                        preview_bgr,
+                        registration_y,
+                        center_on_registration=False,
+                    )
+                    crop_center_y = crop_meta.get('crop_center_y')
 
                 anomaly_reasons = []
                 if super8_mode:
@@ -2200,7 +2239,24 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                     'selected_registration_y': registration_y,
                     'selected_source': tracked.get('selected_source'),
                     'crop_clamped': bool(crop_meta.get('crop_clamped')),
-                    'crop_center_y': crop_meta.get('crop_center_y'),
+                    'crop_center_y': crop_center_y,
+                    'crop_source': (
+                        crop_guidance['source'] if super8_mode else
+                        ('relative_registration' if registration_y is not None else 'full_preview')
+                    ),
+                    'crop_prediction_age': (
+                        crop_guidance['prediction_age'] if super8_mode else None
+                    ),
+                    'crop_phase_trusted': (
+                        bool(phase_result.trusted) if super8_mode else None
+                    ),
+                    'crop_valid': (
+                        bool(crop_guidance['valid'] and not crop_meta.get('crop_clamped'))
+                        if super8_mode else bool(registration_y is not None)
+                    ),
+                    'crop_fallback_reason': (
+                        crop_guidance['fallback_reason'] if super8_mode else None
+                    ),
                     'steps': int(steps_before_update),
                     'target_y': float(target_y),
                     'registration_error_px': float(error_px) if error_px is not None else None,
@@ -2278,6 +2334,24 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                     'detection_method': detection_method,
                     'fast_failure_reason': fast_failure_reason,
                     'registration_source': tracked.get('selected_source'),
+                    'crop_source': (
+                        crop_guidance['source'] if super8_mode else
+                        ('relative_registration' if registration_y is not None else 'full_preview')
+                    ),
+                    'crop_valid': (
+                        bool(crop_guidance['valid'] and not crop_meta.get('crop_clamped'))
+                        if super8_mode else bool(registration_y is not None)
+                    ),
+                    'crop_center_y': crop_center_y,
+                    'crop_prediction_age': (
+                        crop_guidance['prediction_age'] if super8_mode else None
+                    ),
+                    'crop_phase_trusted': (
+                        bool(phase_result.trusted) if super8_mode else None
+                    ),
+                    'crop_fallback_reason': (
+                        crop_guidance['fallback_reason'] if super8_mode else None
+                    ),
                 }))
                 await websocket.send(preview_bytes)
                 await websocket.send(json.dumps({

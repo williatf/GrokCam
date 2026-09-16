@@ -29,6 +29,55 @@ class PhaseResult:
         }
 
 
+def select_super8_crop_guidance(phase_result, last_safe_center_y=None,
+                                max_prediction_age=2):
+    """Select display-only Super 8 crop guidance from a phase result.
+
+    This intentionally does not alter phase trust or registration state.  A
+    prediction is allowed only for a short, ordinary detector loss; reseed
+    observations and other unsafe losses fall back to the last safe centered
+    crop.
+    """
+    if phase_result.trusted and phase_result.selected_y is not None:
+        return {
+            'center_y': float(phase_result.selected_y),
+            'source': 'trusted_phase',
+            'prediction_age': 0,
+            'valid': True,
+            'fallback_reason': None,
+        }
+
+    if (
+        phase_result.reason == 'no_complete_candidates'
+        and phase_result.predicted_y is not None
+        and 0 < int(phase_result.loss_count) <= int(max_prediction_age)
+    ):
+        return {
+            'center_y': float(phase_result.predicted_y),
+            'source': 'predicted_phase',
+            'prediction_age': int(phase_result.loss_count),
+            'valid': True,
+            'fallback_reason': None,
+        }
+
+    if last_safe_center_y is not None:
+        return {
+            'center_y': float(last_safe_center_y),
+            'source': 'held_safe',
+            'prediction_age': None,
+            'valid': True,
+            'fallback_reason': phase_result.reason,
+        }
+
+    return {
+        'center_y': None,
+        'source': 'full_preview',
+        'prediction_age': None,
+        'valid': False,
+        'fallback_reason': phase_result.reason,
+    }
+
+
 class Super8PhaseTracker:
     """Associate detector candidates with the expected physical phase.
 
@@ -77,7 +126,11 @@ class Super8PhaseTracker:
             return self._result(True, 'seeded', selected_y=self.last_y,
                                 candidate_count=len(candidates))
 
-        if self.loss_count >= self.reseed_after_loss and not self._reseed_observations:
+        if (
+            self.loss_count >= self.reseed_after_loss
+            and candidates
+            and not self._reseed_observations
+        ):
             # A lost phase is deliberately not recovered from one lucky hole.
             # Start a new controlled sequence, then require confirmations.
             selected = max(candidates, key=lambda item: float(item.get('score', 0.0)))

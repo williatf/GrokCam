@@ -74,6 +74,14 @@ class Super8PhaseTrackerTests(unittest.TestCase):
         self.assertTrue(recovered.trusted)
         self.assertAlmostEqual(recovered.predicted_y, 500.0)
 
+    def test_prolonged_loss_without_candidates_remains_safe_and_does_not_crash(self):
+        tracker = self.tracker()
+        tracker.update([self.candidate(500)], 20)
+        results = [tracker.update([], 20) for _ in range(5)]
+        self.assertTrue(all(not result.trusted for result in results))
+        self.assertEqual(results[-1].reason, 'no_complete_candidates')
+        self.assertEqual(results[-1].loss_count, 5)
+
     def test_formal_calibration_nominal_residual_is_about_point_54_px(self):
         from film_calibration import load_film_calibration, resolve_raw_preview_transport
 
