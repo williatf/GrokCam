@@ -83,7 +83,7 @@ class Super8PhaseTrackerTests(unittest.TestCase):
         self.assertAlmostEqual(second.predicted_y, 498.0)
         self.assertAlmostEqual(tracker.predicted_y, 498.0)
 
-    def test_coherent_recovery_preserves_epoch_and_delays_trust(self):
+    def test_two_hit_recovery_preserves_epoch_and_restores_trust(self):
         tracker = self.tracker()
         tracker.update([self.candidate(500)], 20)
         results = [
@@ -93,11 +93,22 @@ class Super8PhaseTrackerTests(unittest.TestCase):
         ]
         self.assertEqual(
             [result.reason for result in results],
-            ['recovery_started', 'recovery_confirming', 'recovery_established'],
+            ['recovery_started', 'recovery_established', 'tracked'],
         )
-        self.assertTrue(all(not result.trusted for result in results))
+        self.assertFalse(results[0].trusted)
+        self.assertTrue(results[1].trusted)
         self.assertEqual(tracker.phase_epoch, 0)
         self.assertTrue(tracker.update([self.candidate(537)], 20).trusted)
+
+    def test_recovery_establishment_is_not_reseed(self):
+        tracker = self.tracker()
+        tracker.update([self.candidate(500)], 20)
+        tracker.update([self.candidate(535, score=0.1)], 20)
+        result = tracker.update([self.candidate(536, score=0.1)], 20)
+        self.assertTrue(result.trusted)
+        self.assertEqual(result.reason, 'recovery_established')
+        self.assertEqual(result.reseed_count, 0)
+        self.assertEqual(result.phase_epoch, 0)
 
     def test_recovery_uses_geometry_not_detector_score(self):
         tracker = self.tracker()
@@ -142,7 +153,7 @@ class Super8PhaseTrackerTests(unittest.TestCase):
         tracker = Super8PhaseTracker(
             pixels_per_step=1.0, expected_sprocket_pitch_px=20.0,
             preview_size=(760, 570), motion_direction=-1,
-            recovery_horizon=2, reseed_confirmations=3,
+            recovery_horizon=2, recovery_confirmations=3,
         )
         tracker.update([self.candidate(500)], 20)
         self.assertEqual(

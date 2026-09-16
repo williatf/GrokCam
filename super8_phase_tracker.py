@@ -114,7 +114,8 @@ class Super8PhaseTracker:
                  reseed_confirmations=3, recovery_gate_px=60.0,
                  recovery_motion_tolerance_px=20.0,
                  recovery_geometry_tolerance=0.45, recovery_horizon=3,
-                 recovery_ambiguity_margin_px=8.0):
+                 recovery_ambiguity_margin_px=8.0,
+                 recovery_confirmations=2):
         self.pixels_per_step = float(pixels_per_step)
         self.expected_sprocket_pitch_px = float(expected_sprocket_pitch_px)
         if self.pixels_per_step <= 0 or self.expected_sprocket_pitch_px <= 0:
@@ -130,6 +131,7 @@ class Super8PhaseTracker:
         self.recovery_geometry_tolerance = float(recovery_geometry_tolerance)
         self.recovery_horizon = int(recovery_horizon)
         self.recovery_ambiguity_margin_px = float(recovery_ambiguity_margin_px)
+        self.recovery_confirmations = max(2, int(recovery_confirmations))
         self.reset()
 
     def reset(self):
@@ -380,7 +382,7 @@ class Super8PhaseTracker:
         )
         if (
             hypothesis['age'] >= self.recovery_horizon
-            and hypothesis['confirmations'] < self.reseed_confirmations
+            and hypothesis['confirmations'] < self.recovery_confirmations
         ):
             self._recovery = None
             return self._lost(
@@ -388,7 +390,7 @@ class Super8PhaseTracker:
                 predicted_y=self._physical_y(predicted), predicted_unwrapped_y=predicted,
                 candidate_diagnostics=diagnostics,
             )
-        if hypothesis['confirmations'] >= self.reseed_confirmations:
+        if hypothesis['confirmations'] >= self.recovery_confirmations:
             self.last_y = float(candidate['center_y'])
             self.last_unwrapped_y = float(unwrapped)
             self.predicted_unwrapped_y = self.last_unwrapped_y
@@ -400,7 +402,7 @@ class Super8PhaseTracker:
             confirmations = hypothesis['confirmations']
             self._recovery = None
             return self._result(
-                False, 'recovery_established', selected_y=self.last_y,
+                True, 'recovery_established', selected_y=self.last_y,
                 selected_raw_y=self.last_y, selected_unwrapped_y=self.last_unwrapped_y,
                 predicted_y=self._physical_y(predicted), predicted_unwrapped_y=predicted,
                 pitch_offset=offset, phase_wrapped=offset != 0,

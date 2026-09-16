@@ -1800,12 +1800,21 @@ async def run_raw_capture(websocket, num_frames, stop_event):
         previous_trusted_pair_y = None
         last_safe_crop_center_y = None
         anomaly_count = 0
+        frames_since_takeup_pulse = None
 
         for frame_index in range(1, int(num_frames) + 1):
             if stop_event.is_set():
                 break
             frame_started = time.perf_counter()
             tc.steps_forward(current_steps)
+            takeup_telemetry = (
+                tc.get_last_takeup_telemetry()
+                if hasattr(tc, 'get_last_takeup_telemetry') else {}
+            )
+            if takeup_telemetry.get('takeup_pulse_started'):
+                frames_since_takeup_pulse = 0
+            elif frames_since_takeup_pulse is not None:
+                frames_since_takeup_pulse += 1
             cumulative_motor_steps += int(current_steps)
             await asyncio.sleep(0.05)
             fresh_after_ns = time.monotonic_ns()
@@ -1881,6 +1890,7 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                         'phase_recovery_geometry_tolerance': phase_tracker.recovery_geometry_tolerance,
                         'phase_recovery_horizon': phase_tracker.recovery_horizon,
                         'phase_recovery_ambiguity_margin_px': phase_tracker.recovery_ambiguity_margin_px,
+                        'phase_recovery_confirmations': phase_tracker.recovery_confirmations,
                     })
                     full_sprockets = list(sprockets)
                     full_count = len(full_sprockets)
@@ -2090,8 +2100,8 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                         trusted=phase_result.trusted,
                         correction_gain=0.25,
                         dead_band_px=dead_band_px,
-                        min_correction=-24,
-                        max_correction=24,
+                        min_correction=-32,
+                        max_correction=32,
                         min_command=min_steps,
                         max_command=max_steps,
                     )
@@ -2333,6 +2343,15 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                     'super8_threshold': super8_threshold,
                     'super8_candidate_count': super8_candidate_count,
                     'super8_viable_count': super8_viable_count,
+                    'takeup_active': bool(takeup_telemetry.get('takeup_active', False)),
+                    'takeup_pulse_started': bool(takeup_telemetry.get('takeup_pulse_started', False)),
+                    'takeup_pulse_sequence': takeup_telemetry.get('takeup_pulse_sequence'),
+                    'takeup_command': takeup_telemetry.get('takeup_command'),
+                    'takeup_pulse_duration': takeup_telemetry.get('takeup_pulse_duration'),
+                    'takeup_motor_steps': takeup_telemetry.get('takeup_motor_steps'),
+                    'takeup_motor_direction': takeup_telemetry.get('takeup_motor_direction'),
+                    'frames_since_takeup_pulse': frames_since_takeup_pulse,
+                    'takeup_timestamp': takeup_telemetry.get('takeup_timestamp'),
                     'super8_detector_registration_y': super8_detector_registration_y,
                     'super8_applied_motor_steps': int(cumulative_motor_steps),
                     **phase,

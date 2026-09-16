@@ -56,7 +56,7 @@ class Super8Stage1TransportResult:
 def calculate_super8_stage1_transport(
     error_px, nominal_steps, pixels_per_step, trusted,
     correction_gain=0.25, dead_band_px=3.75,
-    min_correction=-8, max_correction=8,
+    min_correction=-32, max_correction=32,
     min_command=None, max_command=None,
 ):
     """Calculate the stateless, trusted-phase-only Super 8 P command."""

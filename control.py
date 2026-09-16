@@ -30,6 +30,17 @@ class tcControl:
         self.SHUTTER_PINS = [109, 110]
         self.feed_steps_taken = 0
         self.takeup_steps_taken = 0
+        self.takeup_pulse_sequence = 0
+        self._last_takeup_telemetry = {
+            'takeup_active': False,
+            'takeup_pulse_started': False,
+            'takeup_pulse_sequence': 0,
+            'takeup_command': None,
+            'takeup_pulse_duration': None,
+            'takeup_motor_steps': 0,
+            'takeup_motor_direction': None,
+            'takeup_timestamp': None,
+        }
         wiringpi.digitalWrite(self.LED_PIN, 0)
         wiringpi.digitalWrite(self.STEPPER_PINS[2], 0) #enable
         wiringpi.digitalWrite(self.STEPPER_PINS2[2], 0) #enable
@@ -64,6 +75,10 @@ class tcControl:
 
     def takeup_reel_off(self):
         self.set_reel_state(self.TAKEUP_REEL_PIN, False)
+
+    def get_last_takeup_telemetry(self):
+        """Return telemetry for the most recent advance's take-up action."""
+        return dict(self._last_takeup_telemetry)
 
     def steps_forward(self, steps=1):
         # Puller is master, always moves
@@ -128,6 +143,16 @@ class tcControl:
         return int(feed_pulses), int(takeup_pulses)
 
     def _run_deferred_reel_pulses(self, advance_steps, feed_pulses, takeup_pulses):
+        self._last_takeup_telemetry = {
+            'takeup_active': bool(takeup_pulses > 0),
+            'takeup_pulse_started': False,
+            'takeup_pulse_sequence': int(self.takeup_pulse_sequence),
+            'takeup_command': None,
+            'takeup_pulse_duration': None,
+            'takeup_motor_steps': 0,
+            'takeup_motor_direction': None,
+            'takeup_timestamp': None,
+        }
         print(f"[APP] Advance complete: steps={advance_steps}")
         time.sleep(self.ADVANCE_SETTLE_DELAY)
         if feed_pulses <= 0 and takeup_pulses <= 0:
@@ -141,7 +166,22 @@ class tcControl:
         if takeup_pulses > 0:
             print(f"[APP] Running take-up reel pulses: count={takeup_pulses}, steps={takeup_pulses * self.TAKEUP_INTERVAL}")
             for _ in range(takeup_pulses):
+                started = time.monotonic_ns()
+                self.takeup_pulse_sequence += 1
                 self.pulse_reel(self.TAKEUP_REEL_PIN, self.TAKEUP_PULSE_DURATION)
+                self._last_takeup_telemetry.update({
+                    'takeup_pulse_started': True,
+                    'takeup_pulse_sequence': int(self.takeup_pulse_sequence),
+                    'takeup_command': {
+                        'pulse_count': int(takeup_pulses),
+                        'steps': int(takeup_pulses * self.TAKEUP_INTERVAL),
+                    },
+                    'takeup_pulse_duration': (
+                        time.monotonic_ns() - started
+                    ) / 1_000_000_000.0,
+                    'takeup_motor_steps': int(self.TAKEUP_INTERVAL),
+                    'takeup_timestamp': int(started),
+                })
 
         print("[APP] Deferred reel pulses complete")
         time.sleep(self.POST_TAKEUP_SETTLE_DELAY)
