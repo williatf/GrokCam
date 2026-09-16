@@ -9,6 +9,13 @@ def annotate_super8_debug_preview(
     selected_y=None,
     phase_trusted=False,
     predicted_y=None,
+    selected_unwrapped_y=None,
+    predicted_unwrapped_y=None,
+    phase_pitch_offset=0,
+    phase_wrapped=False,
+    registration_error_px=None,
+    requested_correction=None,
+    limited_correction=None,
     registration_target_y=None,
     crop_center_y=None,
     phase_reason=None,
@@ -83,6 +90,12 @@ def annotate_super8_debug_preview(
         lines.append(f'{label}: {float(selected_y):.1f}')
     if predicted_y is not None:
         lines.append(f'Predicted Y: {float(predicted_y):.1f}')
+    if selected_unwrapped_y is not None:
+        lines.append(f'Selected unwrapped: {float(selected_unwrapped_y):.1f}')
+    if predicted_unwrapped_y is not None:
+        lines.append(f'Predicted unwrapped: {float(predicted_unwrapped_y):.1f}')
+    if phase_pitch_offset or phase_wrapped:
+        lines.append(f'Pitch offset: {int(phase_pitch_offset):+d} (wrapped)')
     if registration_target_y is not None:
         lines.append(f'Registration target: {float(registration_target_y):.1f}')
     if phase_trusted and selected_y is not None and registration_target_y is not None:
@@ -91,6 +104,13 @@ def annotate_super8_debug_preview(
         lines.append(f'Crop center: {float(crop_center_y):.1f}')
     if crop_source:
         lines.append(f'Crop source: {crop_source}')
+    if registration_error_px is not None:
+        lines.append(f'Registration error: {float(registration_error_px):+.1f} px')
+    if requested_correction is not None or limited_correction is not None:
+        lines.append(
+            f'Correction: {requested_correction if requested_correction is not None else "n/a"}'
+            f'/{limited_correction if limited_correction is not None else "n/a"}'
+        )
     if phase_reason and phase_reason.startswith('recovery_'):
         lines.append(f'Recovery: {recovery_age}/{recovery_confirmations}')
         if recovery_distance_px is not None:

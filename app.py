@@ -21,6 +21,7 @@ from super8_detector import Super8Detector
 from super8_phase_tracker import (
     Super8PhaseTracker,
     select_super8_crop_guidance,
+    unwrap_super8_y_near,
 )
 from super8_calibration_service import Super8CalibrationService
 from super8_calibration_result import build_super8_client_summary
@@ -2071,9 +2072,16 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                     # Only the phase tracker may authorize Super 8 control.
                     # RegistrationTracker may hold a crop value, but that held
                     # value is never a transport measurement.
+                    control_y = (
+                        phase_result.selected_unwrapped_y
+                        if phase_result.trusted else None
+                    )
+                    control_target_y = unwrap_super8_y_near(
+                        target_y, control_y, phase_tracker.expected_sprocket_pitch_px
+                    )
                     error_px = (
-                        float(target_y) - float(raw_y)
-                        if phase_result.trusted and raw_y is not None else None
+                        float(control_target_y) - float(control_y)
+                        if control_y is not None and control_target_y is not None else None
                     )
                     stage1 = calculate_super8_stage1_transport(
                         error_px=error_px,
@@ -2082,8 +2090,8 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                         trusted=phase_result.trusted,
                         correction_gain=0.25,
                         dead_band_px=dead_band_px,
-                        min_correction=-8,
-                        max_correction=8,
+                        min_correction=-24,
+                        max_correction=24,
                         min_command=min_steps,
                         max_command=max_steps,
                     )
@@ -2181,6 +2189,13 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                         selected_y=phase_result.selected_y,
                         phase_trusted=phase_result.trusted,
                         predicted_y=phase_result.predicted_y,
+                        selected_unwrapped_y=phase_result.selected_unwrapped_y,
+                        predicted_unwrapped_y=phase_result.predicted_unwrapped_y,
+                        phase_pitch_offset=phase_result.pitch_offset,
+                        phase_wrapped=phase_result.phase_wrapped,
+                        registration_error_px=error_px,
+                        requested_correction=super8_requested_correction,
+                        limited_correction=super8_limited_correction,
                         registration_target_y=target_y,
                         crop_center_y=crop_center_y,
                         phase_reason=phase_result.reason,

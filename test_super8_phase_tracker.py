@@ -1,6 +1,6 @@
 import unittest
 
-from super8_phase_tracker import Super8PhaseTracker
+from super8_phase_tracker import Super8PhaseTracker, unwrap_super8_y_near
 
 
 class Super8PhaseTrackerTests(unittest.TestCase):
@@ -233,16 +233,76 @@ class Super8PhaseTrackerTests(unittest.TestCase):
         tracker.update([self.candidate(407.0)], 308)
         raw_values = (413.42, 98.64, 421.85, 421.75, 421.96, 101.06)
         for raw_y in raw_values:
-            candidates = [self.candidate(raw_y)]
-            equivalent_y = raw_y + 320.02211234782806
-            if equivalent_y <= 570:
-                candidates.append(self.candidate(equivalent_y, score=0.5))
-            equivalent_y = raw_y - 320.02211234782806
-            if equivalent_y >= 0:
-                candidates.append(self.candidate(equivalent_y, score=0.5))
-            result = tracker.update(candidates, 308)
+            result = tracker.update([self.candidate(raw_y)], 308)
             self.assertTrue(result.trusted)
             self.assertLess(abs(result.selected_y - result.predicted_y), 30.0)
+
+    def test_pitch_boundary_candidate_uses_unwrapped_coordinate(self):
+        tracker = Super8PhaseTracker(
+            pixels_per_step=1.0407885250801314,
+            expected_sprocket_pitch_px=320.02211234782806,
+            preview_size=(760, 570), motion_direction=-1,
+        )
+        tracker.update([self.candidate(371.5)], 308)
+        result = tracker.update([self.candidate(52.0)], 308)
+        self.assertTrue(result.trusted)
+        self.assertEqual(result.phase_epoch, 0)
+        self.assertTrue(result.phase_wrapped)
+        self.assertAlmostEqual(result.selected_y, 52.0)
+        self.assertAlmostEqual(result.selected_unwrapped_y, 372.0221, places=3)
+        self.assertAlmostEqual(result.error_px, 0.0, places=1)
+
+    def test_repeated_pitch_boundary_crossings_do_not_reseed(self):
+        tracker = Super8PhaseTracker(
+            pixels_per_step=1.0407885250801314,
+            expected_sprocket_pitch_px=320.02211234782806,
+            preview_size=(760, 570), motion_direction=-1,
+        )
+        tracker.update([self.candidate(371.5)], 308)
+        for y in (52.0, 52.5, 53.0, 53.5):
+            result = tracker.update([self.candidate(y)], 308)
+            self.assertTrue(result.trusted)
+            self.assertEqual(result.phase_epoch, 0)
+
+    def test_pitch_equivalent_candidates_remain_ambiguous(self):
+        tracker = Super8PhaseTracker(
+            pixels_per_step=1.0407885250801314,
+            expected_sprocket_pitch_px=320.02211234782806,
+            preview_size=(760, 570), motion_direction=-1,
+        )
+        tracker.update([self.candidate(371.5)], 308)
+        result = tracker.update([self.candidate(372.0), self.candidate(374.0)], 308)
+        self.assertFalse(result.trusted)
+        self.assertEqual(result.reason, 'ambiguous_phase')
+
+    def test_recovery_across_pitch_boundary_is_untrusted(self):
+        tracker = Super8PhaseTracker(
+            pixels_per_step=1.0407885250801314,
+            expected_sprocket_pitch_px=320.02211234782806,
+            preview_size=(760, 570), motion_direction=-1,
+        )
+        tracker.update([self.candidate(350.0)], 308)
+        result = tracker.update([self.candidate(80.0)], 308)
+        self.assertFalse(result.trusted)
+        self.assertEqual(result.reason, 'recovery_started')
+
+    def test_pitch_boundary_recovery_preserves_unwrapped_anchor(self):
+        tracker = Super8PhaseTracker(
+            pixels_per_step=1.0407885250801314,
+            expected_sprocket_pitch_px=320.02211234782806,
+            preview_size=(760, 570), motion_direction=-1,
+        )
+        tracker.update([self.candidate(371.5)], 308)
+        result = tracker.update([self.candidate(52.0)], 308)
+        self.assertTrue(result.trusted)
+        self.assertTrue(result.phase_wrapped)
+        self.assertGreater(result.selected_unwrapped_y, 300.0)
+
+    def test_target_unwrap_uses_nearest_equivalent(self):
+        self.assertAlmostEqual(
+            unwrap_super8_y_near(285.0, 372.0, 320.02211234782806),
+            285.0,
+        )
 
 
 if __name__ == '__main__':

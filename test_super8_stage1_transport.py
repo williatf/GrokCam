@@ -16,7 +16,7 @@ class Super8Stage1TransportTests(unittest.TestCase):
         self.assertEqual(self.nominal, 308)
         self.assertEqual(load_film_calibration('super8').values['calibration_version'], 2)
 
-    def calculate(self, error, trusted=True, min_command=271, max_command=345):
+    def calculate(self, error, trusted=True, min_command=271, max_command=344):
         return calculate_super8_stage1_transport(
             error_px=error,
             nominal_steps=self.nominal,
@@ -24,8 +24,8 @@ class Super8Stage1TransportTests(unittest.TestCase):
             trusted=trusted,
             correction_gain=0.25,
             dead_band_px=3.75,
-            min_correction=-8,
-            max_correction=8,
+            min_correction=-24,
+            max_correction=24,
             min_command=min_command,
             max_command=max_command,
         )
@@ -45,11 +45,11 @@ class Super8Stage1TransportTests(unittest.TestCase):
         self.assertEqual(result.p_contribution, 0.0)
         self.assertEqual(result.commanded_steps, self.nominal)
 
-    def test_correction_saturates_at_eight_steps(self):
-        self.assertEqual(self.calculate(100).limited_correction, 8)
-        self.assertEqual(self.calculate(-100).limited_correction, -8)
-        self.assertGreater(self.calculate(100).requested_correction, 8)
-        self.assertTrue(self.calculate(100).saturated)
+    def test_correction_saturates_at_24_steps(self):
+        self.assertEqual(self.calculate(100).limited_correction, 24)
+        self.assertEqual(self.calculate(-100).limited_correction, -24)
+        self.assertGreater(self.calculate(150).requested_correction, 24)
+        self.assertTrue(self.calculate(150).saturated)
 
     def test_untrusted_phase_falls_back_to_nominal_without_eligibility(self):
         result = self.calculate(100, trusted=False)
