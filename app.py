@@ -30,7 +30,7 @@ from film_calibration import (
 )
 from transport_calibration import (
     AdaptiveTransportController,
-    calculate_observational_transport,
+    calculate_super8_stage1_transport,
     merge_calibration_settings,
 )
 import socket
@@ -1659,7 +1659,7 @@ async def run_raw_capture(websocket, num_frames, stop_event):
 
     film_format = get_project_film_format(active_project_path)
     super8_mode = film_format == FILM_FORMAT_SUPER8
-    transport_correction_mode = 'fixed_open_loop' if super8_mode else 'adaptive'
+    transport_correction_mode = 'stage1_proportional' if super8_mode else 'adaptive'
 
     raw_path = os.path.join(active_project_path, "raw")
     debug_path = os.path.join(active_project_path, "debug")
@@ -1711,7 +1711,7 @@ async def run_raw_capture(websocket, num_frames, stop_event):
     print("[APP] RAW capture: LED on + camera, stabilizing...")
     try:
         await asyncio.sleep(2)
-        dead_band_px = 10.0 * raw_preview_scale
+        dead_band_px = 3.75 if super8_mode else 10.0 * raw_preview_scale
         # These pre-existing 88%..112% bounds are the known safe transport
         # envelope.  Correction and base learning are independently bounded
         # inside it.
@@ -1993,6 +1993,13 @@ async def run_raw_capture(websocket, num_frames, stop_event):
 
                 steps_before_update = current_steps
                 correction = 0
+                super8_p_contribution = 0.0
+                super8_requested_correction = 0
+                super8_limited_correction = 0
+                super8_applied_correction = 0
+                super8_deadband_active = False
+                super8_saturated = False
+                super8_controller_eligible = False
                 control_result = None
                 observational_correction = None
                 observational_next_steps = None
@@ -2002,63 +2009,87 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                 reacquire_reason = None
                 reacquire_ms = 0.0
                 next_steps = nominal_steps_per_pitch if super8_mode else transport.adaptive_base_steps
-                if raw_y is not None:
+                if super8_mode:
+                    # Only the phase tracker may authorize Super 8 control.
+                    # RegistrationTracker may hold a crop value, but that held
+                    # value is never a transport measurement.
+                    error_px = (
+                        float(target_y) - float(raw_y)
+                        if phase_result.trusted and raw_y is not None else None
+                    )
+                    stage1 = calculate_super8_stage1_transport(
+                        error_px=error_px,
+                        nominal_steps=nominal_steps_per_pitch,
+                        pixels_per_step=pixels_per_step,
+                        trusted=phase_result.trusted,
+                        correction_gain=0.25,
+                        dead_band_px=dead_band_px,
+                        min_correction=-8,
+                        max_correction=8,
+                        min_command=min_steps,
+                        max_command=max_steps,
+                    )
+                    super8_p_contribution = stage1.p_contribution
+                    super8_requested_correction = stage1.requested_correction
+                    super8_limited_correction = stage1.limited_correction
+                    super8_applied_correction = stage1.applied_correction
+                    super8_deadband_active = stage1.deadband_active
+                    super8_saturated = stage1.saturated
+                    super8_controller_eligible = stage1.eligible
+                    correction = stage1.applied_correction
+                    next_steps = stage1.commanded_steps
+                    current_steps = next_steps
+                elif raw_y is not None:
                     error_px = float(target_y) - float(raw_y)
-                    if super8_mode:
-                        # Super 8 remains fixed/open-loop. Phase is diagnostic
-                        # and registration-relative only; it never commands
-                        # transport correction.
-                        current_steps = nominal_steps_per_pitch
-                    else:
-                        update_allowed = (
-                            raw_mode == 'pair'
-                            and full_count >= 2
-                            and partial_count == 0
-                            and 'registration_phase_jump' not in anomaly_reasons
-                            and (
-                                detector_disagreement_px is None
-                                or detector_disagreement_px <= 20.0
-                                or detection_method == 'fallback_validation'
-                            )
+                    update_allowed = (
+                        raw_mode == 'pair'
+                        and full_count >= 2
+                        and partial_count == 0
+                        and 'registration_phase_jump' not in anomaly_reasons
+                        and (
+                            detector_disagreement_px is None
+                            or detector_disagreement_px <= 20.0
+                            or detection_method == 'fallback_validation'
                         )
-                        if update_allowed:
-                            controlled_error = error_px if abs(error_px) > dead_band_px else 0.0
-                            control_result = transport.update(controlled_error)
-                            correction = control_result.correction
-                            next_steps = control_result.commanded_steps
-                            current_steps = next_steps
-                            trusted_step_history.append(int(current_steps))
-                            previous_trusted_pair_y = float(raw_y)
-                            if control_result.warning:
-                                saturated_run = max(
-                                    transport.negative_saturation_run,
-                                    transport.positive_saturation_run,
-                                )
-                                print(
-                                    f"[APP] WARNING: sustained transport saturation: frame={frame_number} "
-                                    f"correction={correction:+d} limits={transport.min_correction:+d}..{transport.max_correction:+d} "
-                                    f"adaptive_base_steps={transport.adaptive_base_steps} "
-                                    f"commanded_steps={current_steps} consecutive_frames={saturated_run}"
-                                )
-                            if control_result.bias_warning:
-                                rolling = transport.rolling_statistics()
-                                print(
-                                    f"[APP] WARNING: persistent transport bias: frame={frame_number} "
-                                    f"window={rolling['sample_count']} median={rolling['median_correction']:+.1f} "
-                                    f"negative_share={rolling['negative_share']:.1%} positive_share={rolling['positive_share']:.1%} "
-                                    f"range={rolling['min_correction']:+d}..{rolling['max_correction']:+d} "
-                                    f"adaptive_base={transport.adaptive_base_steps} nominal={nominal_steps_per_pitch} "
-                                    f"integral={transport.integral_steps:+.3f} "
-                                    f"correction_limits={transport.min_correction:+d}..{transport.max_correction:+d} "
-                                    f"motor_limits={transport.min_command}..{transport.max_command} "
-                                    f"status={control_result.bias_warning_status} "
-                                    f"adaptation={control_result.adaptation_reason or 'none'}"
-                                )
-                        else:
-                            # Do not repeat a corrective command when registration
-                            # is partial or otherwise untrusted.
-                            transport.update(None, trusted=False)
-                            current_steps = next_steps
+                    )
+                    if update_allowed:
+                        controlled_error = error_px if abs(error_px) > dead_band_px else 0.0
+                        control_result = transport.update(controlled_error)
+                        correction = control_result.correction
+                        next_steps = control_result.commanded_steps
+                        current_steps = next_steps
+                        trusted_step_history.append(int(current_steps))
+                        previous_trusted_pair_y = float(raw_y)
+                        if control_result.warning:
+                            saturated_run = max(
+                                transport.negative_saturation_run,
+                                transport.positive_saturation_run,
+                            )
+                            print(
+                                f"[APP] WARNING: sustained transport saturation: frame={frame_number} "
+                                f"correction={correction:+d} limits={transport.min_correction:+d}..{transport.max_correction:+d} "
+                                f"adaptive_base_steps={transport.adaptive_base_steps} "
+                                f"commanded_steps={current_steps} consecutive_frames={saturated_run}"
+                            )
+                        if control_result.bias_warning:
+                            rolling = transport.rolling_statistics()
+                            print(
+                                f"[APP] WARNING: persistent transport bias: frame={frame_number} "
+                                f"window={rolling['sample_count']} median={rolling['median_correction']:+.1f} "
+                                f"negative_share={rolling['negative_share']:.1%} positive_share={rolling['positive_share']:.1%} "
+                                f"range={rolling['min_correction']:+d}..{rolling['max_correction']:+d} "
+                                f"adaptive_base={transport.adaptive_base_steps} nominal={nominal_steps_per_pitch} "
+                                f"integral={transport.integral_steps:+.3f} "
+                                f"correction_limits={transport.min_correction:+d}..{transport.max_correction:+d} "
+                                f"motor_limits={transport.min_command}..{transport.max_command} "
+                                f"status={control_result.bias_warning_status} "
+                                f"adaptation={control_result.adaptation_reason or 'none'}"
+                            )
+                    else:
+                        # Do not repeat a corrective command when registration
+                        # is partial or otherwise untrusted.
+                        transport.update(None, trusted=False)
+                        current_steps = next_steps
                 else:
                     error_px = None
                     if not super8_mode:
@@ -2162,6 +2193,17 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                     'adaptive_base_steps': int(transport.adaptive_base_steps),
                     'transport_integral_steps': round(float(transport.integral_steps), 4),
                     'configured_nominal_steps': int(nominal_steps_per_pitch),
+                    'nominal_steps': int(nominal_steps_per_pitch),
+                    'registration_error': float(error_px) if error_px is not None else None,
+                    'p_contribution': round(float(super8_p_contribution), 4) if super8_mode else None,
+                    'requested_correction': int(super8_requested_correction) if super8_mode else None,
+                    'limited_correction': int(super8_limited_correction) if super8_mode else None,
+                    'applied_correction': int(super8_applied_correction) if super8_mode else None,
+                    'commanded_steps': int(current_steps),
+                    'applied_steps': int(steps_before_update),
+                    'deadband_active': bool(super8_deadband_active) if super8_mode else None,
+                    'saturated': bool(super8_saturated) if super8_mode else None,
+                    'controller_eligible': bool(super8_controller_eligible) if super8_mode else None,
                     'transport_correction_mode': transport_correction_mode,
                     'transport_calibration_source': film_calibration.source_name,
                     'transport_calibration_status': film_calibration.status,

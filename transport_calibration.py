@@ -39,6 +39,69 @@ class ObservationalTransportResult:
     commanded_steps: int
 
 
+@dataclass
+class Super8Stage1TransportResult:
+    nominal_steps: int
+    error_px: float = None
+    p_contribution: float = 0.0
+    requested_correction: int = 0
+    limited_correction: int = 0
+    applied_correction: int = 0
+    commanded_steps: int = 0
+    deadband_active: bool = False
+    saturated: bool = False
+    eligible: bool = False
+
+
+def calculate_super8_stage1_transport(
+    error_px, nominal_steps, pixels_per_step, trusted,
+    correction_gain=0.25, dead_band_px=3.75,
+    min_correction=-8, max_correction=8,
+    min_command=None, max_command=None,
+):
+    """Calculate the stateless, trusted-phase-only Super 8 P command."""
+    nominal_steps = int(nominal_steps)
+    pixels_per_step = float(pixels_per_step)
+    if pixels_per_step <= 0:
+        raise ValueError('pixels_per_step must be positive')
+    min_command = nominal_steps if min_command is None else int(min_command)
+    max_command = nominal_steps if max_command is None else int(max_command)
+    safe_nominal = max(min_command, min(max_command, nominal_steps))
+    if not trusted or error_px is None:
+        return Super8Stage1TransportResult(
+            nominal_steps=nominal_steps,
+            commanded_steps=safe_nominal,
+        )
+
+    error_px = float(error_px)
+    deadband_active = abs(error_px) <= float(dead_band_px)
+    controlled_error = 0.0 if deadband_active else error_px
+    p_contribution = controlled_error / pixels_per_step * float(correction_gain)
+    raw_correction = int(round(p_contribution))
+    limited_correction = max(
+        int(min_correction), min(int(max_correction), raw_correction)
+    )
+    requested_steps = nominal_steps + limited_correction
+    commanded_steps = max(min_command, min(max_command, requested_steps))
+    applied_correction = commanded_steps - nominal_steps
+    saturated = (
+        limited_correction != raw_correction
+        or commanded_steps != requested_steps
+    )
+    return Super8Stage1TransportResult(
+        nominal_steps=nominal_steps,
+        error_px=error_px,
+        p_contribution=p_contribution,
+        requested_correction=raw_correction,
+        limited_correction=limited_correction,
+        applied_correction=applied_correction,
+        commanded_steps=commanded_steps,
+        deadband_active=deadband_active,
+        saturated=saturated,
+        eligible=True,
+    )
+
+
 def calculate_observational_transport(error_px, nominal_steps, pixels_per_step,
                                       correction_gain, dead_band_px,
                                       min_correction, max_correction,
