@@ -14,8 +14,13 @@ class TakeupTelemetryTests(unittest.TestCase):
     def make_control(self):
         tc = control.tcControl.__new__(control.tcControl)
         tc.takeup_pulse_sequence = 0
+        tc.feed_steps_taken = 0
+        tc._adaptive_takeup_enabled = False
+        tc._takeup_frame_counter = 0
+        tc._takeup_interval_frames = None
         tc.TAKEUP_REEL_PIN = 107
         tc.TAKEUP_INTERVAL = 2500
+        tc.FEED_INTERVAL = 5000
         tc.TAKEUP_PULSE_DURATION = 0.2
         tc.ADVANCE_SETTLE_DELAY = 0
         tc.POST_TAKEUP_SETTLE_DELAY = 0
@@ -39,6 +44,7 @@ class TakeupTelemetryTests(unittest.TestCase):
         self.assertIsNone(telemetry['takeup_motor_direction'])
         self.assertIsInstance(telemetry['takeup_timestamp'], int)
         self.assertGreaterEqual(telemetry['takeup_pulse_duration'], 0.0)
+        self.assertEqual(tc.pulse_reel.call_args.args[1], tc.TAKEUP_PULSE_DURATION)
         tc.pulse_reel.assert_called_once()
 
     def test_advance_without_pulse_is_distinguishable(self):
@@ -62,6 +68,21 @@ class TakeupTelemetryTests(unittest.TestCase):
         self.assertEqual(telemetry['takeup_pulse_sequence'], 2)
         self.assertEqual(telemetry['takeup_command']['pulse_count'], 2)
         self.assertEqual(tc.pulse_reel.call_count, 2)
+
+    def test_adaptive_takeup_schedule_preserves_feed_schedule(self):
+        tc = self.make_control()
+        tc.feed_steps_taken = 4999
+        tc.begin_takeup_capture(12)
+        feed_pulses, takeup_pulses = tc._schedule_reel_pulses(2)
+        self.assertEqual(feed_pulses, 1)
+        self.assertEqual(takeup_pulses, 0)
+
+    def test_adaptive_interval_counts_capture_frames(self):
+        tc = self.make_control()
+        tc.begin_takeup_capture(12)
+        pulses = [tc._schedule_reel_pulses(308)[1] for _ in range(12)]
+        self.assertEqual(sum(pulses), 1)
+        self.assertEqual(pulses[-1], 1)
 
 
 if __name__ == '__main__':

@@ -23,6 +23,7 @@ from super8_phase_tracker import (
     select_super8_crop_guidance,
     unwrap_super8_y_near,
 )
+from takeup_interval_controller import AdaptiveTakeupIntervalController
 from super8_calibration_service import Super8CalibrationService
 from super8_calibration_result import build_super8_client_summary
 from super8_debug_overlay import annotate_super8_debug_preview
@@ -1729,6 +1730,8 @@ async def run_raw_capture(websocket, num_frames, stop_event):
         # inside it.
         min_steps = int(nominal_steps_per_pitch * 0.88)
         max_steps = int(nominal_steps_per_pitch * 1.12)
+        if takeup_interval_controller is not None:
+            tc.end_takeup_capture()
         project_manifest = load_project_metadata(active_project_path)
         saved_transport_state = None
         if not super8_mode and next_frame_number > 1:
@@ -1801,6 +1804,13 @@ async def run_raw_capture(websocket, num_frames, stop_event):
         last_safe_crop_center_y = None
         anomaly_count = 0
         frames_since_takeup_pulse = None
+        takeup_interval_controller = (
+            AdaptiveTakeupIntervalController()
+            if super8_mode else None
+        )
+        if takeup_interval_controller is not None:
+            tc.begin_takeup_capture(takeup_interval_controller.interval_frames)
+        takeup_pulse_context = None
 
         for frame_index in range(1, int(num_frames) + 1):
             if stop_event.is_set():
@@ -1967,6 +1977,62 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                             raw_y = float(crosscheck_registration_y)
                             detection_method = 'fallback_validation'
                             raw_fast_detector.seed(full_sprockets, preview_bgr.shape)
+
+                takeup_adaptation = None
+                takeup_postpulse_1 = None
+                takeup_postpulse_2 = None
+                if super8_mode:
+                    # The phase residual is relative to the calibrated phase
+                    # prediction, so ordinary frame advance is excluded from
+                    # the pulse disturbance measurement.  This is display /
+                    # take-up adaptation telemetry only; it never changes
+                    # phase trust or main transport eligibility.
+                    if takeup_pulse_context is not None:
+                        pulse_age = frame_number - takeup_pulse_context['frame']
+                        response_value = phase_result.error_px
+                        response = {
+                            'displacement_px': response_value,
+                            'source': (
+                                'trusted_phase_residual'
+                                if response_value is not None and phase_result.trusted
+                                else 'untrusted_phase_candidate'
+                                if response_value is not None else None
+                            ),
+                            'trusted': bool(phase_result.trusted),
+                        }
+                        if pulse_age == 1:
+                            takeup_postpulse_1 = response
+                            plausible_loss = (
+                                not phase_result.trusted
+                                and response_value is not None
+                                and phase_result.reason in {
+                                    'candidate_outside_phase_gate',
+                                    'recovery_started',
+                                    'recovery_confirming',
+                                    'ambiguous_phase',
+                                }
+                            )
+                            takeup_adaptation = takeup_interval_controller.decide(
+                                takeup_pulse_context['sequence'],
+                                disturbance_px=response_value,
+                                trusted=bool(phase_result.trusted),
+                                plausible_phase_loss=plausible_loss,
+                            )
+                            tc.set_takeup_interval_frames(
+                                takeup_adaptation.interval_after
+                            )
+                            takeup_pulse_context['postpulse_1'] = response
+                        elif pulse_age == 2:
+                            takeup_postpulse_1 = takeup_pulse_context.get('postpulse_1')
+                            takeup_postpulse_2 = response
+                        if pulse_age >= 2:
+                            takeup_pulse_context = None
+
+                    if takeup_telemetry.get('takeup_pulse_started'):
+                        takeup_pulse_context = {
+                            'frame': frame_number,
+                            'sequence': takeup_telemetry.get('takeup_pulse_sequence'),
+                        }
                 detection_ms = (time.perf_counter() - detection_started) * 1000.0
                 tracked = raw_tracker.update(
                     raw_registration_y=raw_y,
@@ -2352,6 +2418,75 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                     'takeup_motor_direction': takeup_telemetry.get('takeup_motor_direction'),
                     'frames_since_takeup_pulse': frames_since_takeup_pulse,
                     'takeup_timestamp': takeup_telemetry.get('takeup_timestamp'),
+                    'takeup_interval_initial_frames': (
+                        takeup_interval_controller.initial_interval
+                        if super8_mode else None
+                    ),
+                    'takeup_interval_min_frames': (
+                        takeup_interval_controller.min_interval
+                        if super8_mode else None
+                    ),
+                    'takeup_interval_max_frames': (
+                        takeup_interval_controller.max_interval
+                        if super8_mode else None
+                    ),
+                    'takeup_interval_frames': (
+                        takeup_interval_controller.interval_frames
+                        if super8_mode else takeup_telemetry.get('takeup_interval_frames')
+                    ),
+                    'takeup_interval_before': (
+                        takeup_adaptation.interval_before
+                        if takeup_adaptation is not None else
+                        takeup_telemetry.get('takeup_interval_before')
+                    ),
+                    'takeup_interval_after': (
+                        takeup_adaptation.interval_after
+                        if takeup_adaptation is not None else
+                        takeup_telemetry.get('takeup_interval_after')
+                    ),
+                    'takeup_adaptation_pulse_sequence': (
+                        takeup_adaptation.pulse_sequence
+                        if takeup_adaptation is not None else None
+                    ),
+                    'takeup_adaptation_applied': bool(
+                        takeup_adaptation.adaptation_applied
+                    ) if takeup_adaptation is not None else False,
+                    'takeup_adaptation_delta': (
+                        takeup_adaptation.adaptation_delta
+                        if takeup_adaptation is not None else 0
+                    ),
+                    'takeup_adaptation_reason': (
+                        takeup_adaptation.adaptation_reason
+                        if takeup_adaptation is not None else None
+                    ),
+                    'takeup_disturbance_filtered_px': (
+                        takeup_adaptation.disturbance_filtered_px
+                        if takeup_adaptation is not None else None
+                    ),
+                    'takeup_postpulse_1_displacement_px': (
+                        takeup_postpulse_1['displacement_px']
+                        if takeup_postpulse_1 is not None else None
+                    ),
+                    'takeup_postpulse_1_source': (
+                        takeup_postpulse_1['source']
+                        if takeup_postpulse_1 is not None else None
+                    ),
+                    'takeup_postpulse_1_trusted': (
+                        takeup_postpulse_1['trusted']
+                        if takeup_postpulse_1 is not None else None
+                    ),
+                    'takeup_postpulse_2_displacement_px': (
+                        takeup_postpulse_2['displacement_px']
+                        if takeup_postpulse_2 is not None else None
+                    ),
+                    'takeup_postpulse_2_source': (
+                        takeup_postpulse_2['source']
+                        if takeup_postpulse_2 is not None else None
+                    ),
+                    'takeup_postpulse_2_trusted': (
+                        takeup_postpulse_2['trusted']
+                        if takeup_postpulse_2 is not None else None
+                    ),
                     'super8_detector_registration_y': super8_detector_registration_y,
                     'super8_applied_motor_steps': int(cumulative_motor_steps),
                     **phase,
@@ -2465,6 +2600,22 @@ async def run_raw_capture(websocket, num_frames, stop_event):
             'transport_correction_mode': transport_correction_mode,
             'transport_calibration_source': film_calibration.source_name,
             'transport_calibration_status': film_calibration.status,
+            'takeup_interval_initial_frames': (
+                takeup_interval_controller.initial_interval
+                if takeup_interval_controller is not None else None
+            ),
+            'takeup_interval_min_frames': (
+                takeup_interval_controller.min_interval
+                if takeup_interval_controller is not None else None
+            ),
+            'takeup_interval_max_frames': (
+                takeup_interval_controller.max_interval
+                if takeup_interval_controller is not None else None
+            ),
+            'takeup_interval_final_frames': (
+                takeup_interval_controller.interval_frames
+                if takeup_interval_controller is not None else None
+            ),
             **final_transport_diagnostics,
         })
         await websocket.send(json.dumps({
@@ -2481,6 +2632,8 @@ async def run_raw_capture(websocket, num_frames, stop_event):
             f"anomaly_path={anomaly_path}"
         )
     finally:
+        if super8_mode and hasattr(tc, 'end_takeup_capture'):
+            tc.end_takeup_capture()
         tc.clean_up()
         camera.stop()
         configure_legacy_camera()

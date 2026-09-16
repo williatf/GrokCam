@@ -31,6 +31,9 @@ class tcControl:
         self.feed_steps_taken = 0
         self.takeup_steps_taken = 0
         self.takeup_pulse_sequence = 0
+        self._adaptive_takeup_enabled = False
+        self._takeup_frame_counter = 0
+        self._takeup_interval_frames = None
         self._last_takeup_telemetry = {
             'takeup_active': False,
             'takeup_pulse_started': False,
@@ -40,6 +43,9 @@ class tcControl:
             'takeup_motor_steps': 0,
             'takeup_motor_direction': None,
             'takeup_timestamp': None,
+            'takeup_interval_frames': None,
+            'takeup_interval_before': None,
+            'takeup_interval_after': None,
         }
         wiringpi.digitalWrite(self.LED_PIN, 0)
         wiringpi.digitalWrite(self.STEPPER_PINS[2], 0) #enable
@@ -79,6 +85,22 @@ class tcControl:
     def get_last_takeup_telemetry(self):
         """Return telemetry for the most recent advance's take-up action."""
         return dict(self._last_takeup_telemetry)
+
+    def begin_takeup_capture(self, interval_frames=12):
+        """Use capture-local frame cadence; manual movement remains step-based."""
+        self._adaptive_takeup_enabled = True
+        self._takeup_frame_counter = 0
+        self._takeup_interval_frames = max(1, int(interval_frames))
+
+    def set_takeup_interval_frames(self, interval_frames):
+        if not self._adaptive_takeup_enabled:
+            raise RuntimeError('adaptive take-up capture is not active')
+        self._takeup_interval_frames = max(1, int(interval_frames))
+
+    def end_takeup_capture(self):
+        self._adaptive_takeup_enabled = False
+        self._takeup_frame_counter = 0
+        self._takeup_interval_frames = None
 
     def steps_forward(self, steps=1):
         # Puller is master, always moves
@@ -136,6 +158,15 @@ class tcControl:
         feed_pulses = self.feed_steps_taken // self.FEED_INTERVAL
         self.feed_steps_taken = self.feed_steps_taken % self.FEED_INTERVAL
 
+        if self._adaptive_takeup_enabled:
+            self._takeup_frame_counter += 1
+            takeup_pulses = int(
+                self._takeup_frame_counter >= self._takeup_interval_frames
+            )
+            if takeup_pulses:
+                self._takeup_frame_counter = 0
+            return int(feed_pulses), takeup_pulses
+
         self.takeup_steps_taken += advance_steps
         takeup_pulses = self.takeup_steps_taken // self.TAKEUP_INTERVAL
         self.takeup_steps_taken = self.takeup_steps_taken % self.TAKEUP_INTERVAL
@@ -143,6 +174,7 @@ class tcControl:
         return int(feed_pulses), int(takeup_pulses)
 
     def _run_deferred_reel_pulses(self, advance_steps, feed_pulses, takeup_pulses):
+        interval = self._takeup_interval_frames if self._adaptive_takeup_enabled else None
         self._last_takeup_telemetry = {
             'takeup_active': bool(takeup_pulses > 0),
             'takeup_pulse_started': False,
@@ -152,6 +184,9 @@ class tcControl:
             'takeup_motor_steps': 0,
             'takeup_motor_direction': None,
             'takeup_timestamp': None,
+            'takeup_interval_frames': interval,
+            'takeup_interval_before': interval if takeup_pulses else None,
+            'takeup_interval_after': interval if takeup_pulses else None,
         }
         print(f"[APP] Advance complete: steps={advance_steps}")
         time.sleep(self.ADVANCE_SETTLE_DELAY)
