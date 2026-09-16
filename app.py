@@ -1722,6 +1722,7 @@ async def run_raw_capture(websocket, num_frames, stop_event):
     tc.light_on()
     camera.start()
     print("[APP] RAW capture: LED on + camera, stabilizing...")
+    takeup_interval_controller = None
     try:
         await asyncio.sleep(2)
         dead_band_px = 3.75 if super8_mode else 10.0 * raw_preview_scale
@@ -1730,8 +1731,6 @@ async def run_raw_capture(websocket, num_frames, stop_event):
         # inside it.
         min_steps = int(nominal_steps_per_pitch * 0.88)
         max_steps = int(nominal_steps_per_pitch * 1.12)
-        if takeup_interval_controller is not None:
-            tc.end_takeup_capture()
         project_manifest = load_project_metadata(active_project_path)
         saved_transport_state = None
         if not super8_mode and next_frame_number > 1:
