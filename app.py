@@ -24,6 +24,7 @@ from super8_phase_tracker import (
 )
 from super8_calibration_service import Super8CalibrationService
 from super8_calibration_result import build_super8_client_summary
+from super8_debug_overlay import annotate_super8_debug_preview
 from film_calibration import (
     FILM_FORMAT_REGULAR8,
     FILM_FORMAT_SUPER8,
@@ -2167,9 +2168,23 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                         if reacquired_y is not None:
                             previous_trusted_pair_y = float(reacquired_y)
 
+                display_preview_bgr = preview_bgr
+                if super8_mode:
+                    display_preview_bgr = annotate_super8_debug_preview(
+                        preview_bgr,
+                        candidates=super8_candidates,
+                        selected_y=phase_result.selected_y,
+                        phase_trusted=phase_result.trusted,
+                        predicted_y=phase_result.predicted_y,
+                        registration_target_y=target_y,
+                        crop_center_y=crop_center_y,
+                        phase_reason=phase_result.reason,
+                        crop_source=crop_guidance['source'],
+                    )
                 encode_started = time.perf_counter()
                 ok, encoded = cv2.imencode(
-                    '.jpg', preview_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 85]
+                    '.jpg', display_preview_bgr,
+                    [int(cv2.IMWRITE_JPEG_QUALITY), 85]
                 )
                 if not ok:
                     raise RuntimeError("Failed to encode RAW capture preview")
