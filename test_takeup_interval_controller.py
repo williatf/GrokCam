@@ -12,23 +12,35 @@ class AdaptiveTakeupIntervalControllerTests(unittest.TestCase):
         self.assertEqual(c.interval_frames, 12)
         self.assertEqual((c.min_interval, c.max_interval), (8, 32))
 
-    def test_thresholds_are_one_sided(self):
+    def test_low_disturbance_decreases_by_one_and_other_thresholds_remain(self):
         c = self.controller()
-        self.assertEqual(c.decide(1, 4.9, trusted=True).adaptation_delta, 1)
-        self.assertEqual(c.interval_frames, 13)
+        self.assertEqual(c.decide(1, 4.9, trusted=True).adaptation_delta, -1)
+        self.assertEqual(c.interval_frames, 11)
         c.reset()
         self.assertEqual(c.decide(2, 7.0, trusted=True).adaptation_delta, 0)
         self.assertEqual(c.decide(3, 15.0, trusted=True).adaptation_delta, 2)
         self.assertEqual(c.decide(4, 20.0, trusted=True).adaptation_delta, 4)
 
-    def test_capture_applies_decision_and_never_shortens(self):
+    def test_repeated_low_disturbance_reaches_minimum(self):
         c = self.controller()
-        for sequence, value in ((1, 4.0), (2, 7.0), (3, 15.0), (4, 20.0)):
-            c.decide(sequence, value, trusted=True)
-        self.assertEqual(c.interval_frames, 19)
-        decision = c.decide(5, 0.0, trusted=True)
-        self.assertEqual(decision.adaptation_delta, 1)
-        self.assertGreaterEqual(decision.interval_after, decision.interval_before)
+        intervals = []
+        for sequence in range(1, 6):
+            intervals.append(c.decide(sequence, 4.0, trusted=True).interval_after)
+        self.assertEqual(intervals, [11, 10, 9, 8, 8])
+        self.assertEqual(c.interval_frames, 8)
+
+    def test_low_disturbance_cannot_decrease_below_minimum(self):
+        c = self.controller()
+        c.interval_frames = 8
+        decision = c.decide(1, 0.0, trusted=True)
+        self.assertEqual(decision.interval_after, 8)
+        self.assertEqual(decision.adaptation_delta, 0)
+
+    def test_upward_adaptation_behavior_remains_unchanged(self):
+        c = self.controller()
+        self.assertEqual(c.decide(1, 7.0, trusted=True).adaptation_delta, 0)
+        self.assertEqual(c.decide(2, 15.0, trusted=True).adaptation_delta, 2)
+        self.assertEqual(c.decide(3, 20.0, trusted=True).adaptation_delta, 4)
 
     def test_plausible_untrusted_loss_increases_four(self):
         c = self.controller()

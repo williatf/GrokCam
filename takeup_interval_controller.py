@@ -1,4 +1,4 @@
-"""Capture-local, one-sided adaptive take-up pulse interval control."""
+"""Capture-local adaptive take-up pulse interval control."""
 
 from dataclasses import dataclass
 
@@ -15,7 +15,7 @@ class TakeupIntervalDecision:
 
 
 class AdaptiveTakeupIntervalController:
-    """Lengthen take-up intervals in response to measured pulse disturbance."""
+    """Adjust take-up intervals within capture-local safety bounds."""
 
     def __init__(self, initial_interval=12, min_interval=8, max_interval=32,
                  filter_window=3):
@@ -36,8 +36,9 @@ class AdaptiveTakeupIntervalController:
                plausible_phase_loss=False):
         """Make at most one bounded interval decision for a pulse.
 
-        The filter is a short median of available +1 disturbances. It is
-        intentionally one-sided: evidence never shortens the interval.
+        The filter is a short median of available +1 disturbances. Low
+        disturbance shortens the interval by one frame; larger disturbance
+        lengthens it using the existing upward thresholds.
         """
         sequence = int(pulse_sequence)
         before = self.interval_frames
@@ -63,7 +64,7 @@ class AdaptiveTakeupIntervalController:
             delta = 4
             reason = 'plausible_takeup_phase_loss'
         elif filtered < 5.0:
-            delta = 1
+            delta = -1
             reason = 'low_postpulse_disturbance'
         elif filtered < 10.0:
             delta = 0
@@ -75,7 +76,7 @@ class AdaptiveTakeupIntervalController:
             delta = 4
             reason = 'severe_postpulse_disturbance'
 
-        after = min(self.max_interval, before + delta)
+        after = max(self.min_interval, min(self.max_interval, before + delta))
         applied_delta = after - before
         self.interval_frames = after
         return TakeupIntervalDecision(
