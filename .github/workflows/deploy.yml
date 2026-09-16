@@ -19,14 +19,17 @@ jobs:
 
       - name: Deploy code
         run: |
+          set -euo pipefail
           ssh -i ~/.ssh/id_ed25519 -p 2204 -o StrictHostKeyChecking=no \
             ${{ secrets.PI_USER }}@${{ secrets.PI_HOST }} \
-            "cd ${{ secrets.PI_DIR }} && git pull --ff-only"
+            "set -eu; cd '${{ secrets.PI_DIR }}'; git fetch origin main; git merge --ff-only origin/main; test \"\$(git rev-parse HEAD)\" = \"\$(git rev-parse origin/main)\""
 
-      - name: Restart service (optional)
+      - name: Restart GrokCam service
         env:
           SERVICE_NAME: ${{ secrets.SERVICE_NAME }}
         run: |
-          if [ -n "$SERVICE_NAME" ]; then
-            ssh -i ~/.ssh/id_ed25519 -p 2204 ${{ secrets.PI_USER }}@${{ secrets.PI_HOST }} "sudo systemctl restart $SERVICE_NAME"
-          fi
+          set -euo pipefail
+          test -n "$SERVICE_NAME"
+          ssh -i ~/.ssh/id_ed25519 -p 2204 \
+            ${{ secrets.PI_USER }}@${{ secrets.PI_HOST }} \
+            "set -eu; sudo systemctl restart '$SERVICE_NAME'; sudo systemctl is-active --quiet '$SERVICE_NAME'"

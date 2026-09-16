@@ -2,9 +2,16 @@
 __pycache__/
 *.pyc
 
-# Local machine config
+# Production/runtime calibration and configuration
 calibration.json
+calibration.super8.json
 config.json
+crop_config.json
+
+# Calibration backups generated on production machines
+calibration.backup.*
+calibration.super8.backup.*
+calibration.pi4.backup.json
 
 # Proof-of-concept experiments
 experiments/

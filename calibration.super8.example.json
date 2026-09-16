@@ -1,0 +1,14 @@
+{
+  "calibration_version": 2,
+  "film_format": "super8",
+  "status": "calibrated",
+  "source": "production_super8_physical_track_calibration",
+  "calibration_resolution": [2028, 1520],
+  "exposure_time": 878,
+  "gain": 1.0,
+  "steps_per_pitch": 308,
+  "steps_per_px": 0.3603037417914733,
+  "sprocket_pitch_px": 853.3922995942081,
+  "sprocket_area_min": 31320,
+  "sprocket_area_max": 39861
+}

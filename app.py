@@ -436,7 +436,8 @@ def crop_frame_relative_to_registration(frame_bgr, registration_y):
     return frame_bgr[y1:y2, x1:x2]
 
 
-def get_scaled_relative_crop_rect(frame_bgr, registration_y, source_size=None):
+def get_scaled_relative_crop_rect(frame_bgr, registration_y, source_size=None,
+                                  center_on_registration=False):
     """Apply the calibrated full-resolution crop to a smaller preview stream."""
     frame_h, frame_w = frame_bgr.shape[:2]
     if source_size is None:
@@ -451,8 +452,12 @@ def get_scaled_relative_crop_rect(frame_bgr, registration_y, source_size=None):
     try:
         x1 = int(round(float(crop_settings['x1']) * scale_x))
         x2 = int(round(float(crop_settings['x2']) * scale_x))
-        y1 = int(round(float(registration_y) + float(crop_settings['y_offset']) * scale_y))
         height = max(1, int(round(float(crop_settings['height']) * scale_y)))
+        y1 = int(round(
+            float(registration_y) - height / 2.0
+            if center_on_registration else
+            float(registration_y) + float(crop_settings['y_offset']) * scale_y
+        ))
     except (KeyError, TypeError, ValueError):
         return (0, 0, frame_w, frame_h), {'crop_clamped': False}
 
@@ -472,6 +477,7 @@ def get_scaled_relative_crop_rect(frame_bgr, registration_y, source_size=None):
         'crop_y1': y1,
         'crop_y2': y2,
         'crop_clamped': clamped,
+        'crop_center_y': float(registration_y) if center_on_registration else None,
     }
 
 
@@ -1945,7 +1951,13 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                     expected_sprocket_pitch_px=preview_pitch,
                 )
                 registration_y = tracked.get('stable_registration_y')
-                crop_rect, crop_meta = get_scaled_relative_crop_rect(preview_bgr, registration_y)
+                crop_rect, crop_meta = get_scaled_relative_crop_rect(
+                    preview_bgr,
+                    registration_y,
+                    center_on_registration=(
+                        super8_mode and phase_result.trusted
+                    ),
+                )
 
                 anomaly_reasons = []
                 if super8_mode:
@@ -2187,6 +2199,7 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                     'selected_registration_y': registration_y,
                     'selected_source': tracked.get('selected_source'),
                     'crop_clamped': bool(crop_meta.get('crop_clamped')),
+                    'crop_center_y': crop_meta.get('crop_center_y'),
                     'steps': int(steps_before_update),
                     'target_y': float(target_y),
                     'registration_error_px': float(error_px) if error_px is not None else None,
