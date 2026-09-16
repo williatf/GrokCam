@@ -18,6 +18,7 @@ from calibration_dispatch import (
 )
 from fast_sprocket import FastSprocketDetector
 from super8_detector import Super8Detector
+from super8_phase_tracker import Super8PhaseTracker
 from super8_calibration_service import Super8CalibrationService
 from super8_calibration_result import build_super8_client_summary
 from film_calibration import (
@@ -1658,7 +1659,7 @@ async def run_raw_capture(websocket, num_frames, stop_event):
 
     film_format = get_project_film_format(active_project_path)
     super8_mode = film_format == FILM_FORMAT_SUPER8
-    transport_correction_mode = 'observational_disabled' if super8_mode else 'adaptive'
+    transport_correction_mode = 'fixed_open_loop' if super8_mode else 'adaptive'
 
     raw_path = os.path.join(active_project_path, "raw")
     debug_path = os.path.join(active_project_path, "debug")
@@ -1700,6 +1701,10 @@ async def run_raw_capture(websocket, num_frames, stop_event):
         max_jump_px=40.0 * raw_preview_scale,
         smoothing_alpha=0.8,
     )
+    phase_tracker = Super8PhaseTracker(
+        pixels_per_step=pixels_per_step,
+        preview_size=RAW_PREVIEW_SIZE,
+    ) if super8_mode else None
 
     tc.light_on()
     camera.start()
@@ -1737,6 +1742,7 @@ async def run_raw_capture(websocket, num_frames, stop_event):
             state=saved_transport_state,
         )
         current_steps = nominal_steps_per_pitch if super8_mode else transport.adaptive_base_steps
+        cumulative_motor_steps = 0
         initial_transport_diagnostics = transport.diagnostics()
         initial_transport_diagnostics['correction_mode'] = transport_correction_mode
         project_manifest['film_format'] = film_format
@@ -1785,6 +1791,7 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                 break
             frame_started = time.perf_counter()
             tc.steps_forward(current_steps)
+            cumulative_motor_steps += int(current_steps)
             await asyncio.sleep(0.05)
             fresh_after_ns = time.monotonic_ns()
 
@@ -1840,20 +1847,36 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                 super8_candidate_count = None
                 super8_viable_count = None
                 if super8_mode:
-                    super8_result = raw_super8_detector.detect_registration(preview_bgr)
+                    super8_candidates = raw_super8_detector.detect_candidates(preview_bgr)
+                    super8_result = raw_super8_detector.last_result
                     sprockets = super8_result['sprockets']
+                    phase_result = phase_tracker.update(
+                        super8_candidates,
+                        cumulative_motor_steps,
+                    )
+                    phase = phase_result.as_dict()
+                    phase.update({
+                        'phase_gate_px': phase_tracker.gate_px,
+                        'phase_ambiguity_margin_px': phase_tracker.ambiguity_margin_px,
+                        'phase_motion_direction': phase_tracker.motion_direction,
+                        'phase_pixels_per_step': phase_tracker.pixels_per_step,
+                        'phase_preview_size': list(phase_tracker.preview_size),
+                    })
                     full_sprockets = list(sprockets)
                     full_count = len(full_sprockets)
                     partial_count = int(super8_result['partial_count'])
-                    raw_mode = super8_result['mode']
-                    raw_y = super8_result['actual_y']
+                    raw_mode = 'direct' if phase_result.trusted else 'none'
+                    raw_y = phase_result.selected_y if phase_result.trusted else None
                     fast_failure_reason = super8_result['failure_reason']
                     detection_method = 'super8_bright' if raw_mode == 'direct' else 'super8_failed'
                     super8_confidence = super8_result['confidence']
                     super8_threshold = super8_result['threshold']
                     super8_candidate_count = super8_result['candidate_count']
                     super8_viable_count = super8_result['viable_count']
+                    super8_detector_registration_y = super8_result['actual_y']
                 else:
+                    phase = {}
+                    super8_detector_registration_y = None
                     sprockets = raw_fast_detector.detect(preview_bgr)
                     fast_failure_reason = raw_fast_detector.last_failure
                     detection_method = "fast"
@@ -1932,6 +1955,8 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                         anomaly_reasons.append('partial_sprocket')
                     if super8_viable_count is not None and super8_viable_count > 1:
                         anomaly_reasons.append('super8_multiple_candidates')
+                    if not phase_result.trusted:
+                        anomaly_reasons.append('super8_phase_untrusted')
                 else:
                     if detection_method == 'fallback':
                         anomaly_reasons.append('fast_fallback')
@@ -1980,21 +2005,10 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                 if raw_y is not None:
                     error_px = float(target_y) - float(raw_y)
                     if super8_mode:
-                        observation = calculate_observational_transport(
-                            error_px=error_px,
-                            nominal_steps=nominal_steps_per_pitch,
-                            pixels_per_step=pixels_per_step,
-                            correction_gain=float(settings.get('transport_correction_gain', 0.25)),
-                            dead_band_px=dead_band_px,
-                            min_correction=transport.min_correction,
-                            max_correction=transport.max_correction,
-                            min_command=transport.min_command,
-                            max_command=transport.max_command,
-                        )
-                        observational_correction = observation.correction
-                        observational_next_steps = observation.observed_next_steps
-                        next_steps = observation.commanded_steps
-                        current_steps = next_steps
+                        # Super 8 remains fixed/open-loop. Phase is diagnostic
+                        # and registration-relative only; it never commands
+                        # transport correction.
+                        current_steps = nominal_steps_per_pitch
                     else:
                         update_allowed = (
                             raw_mode == 'pair'
@@ -2167,6 +2181,9 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                     'super8_threshold': super8_threshold,
                     'super8_candidate_count': super8_candidate_count,
                     'super8_viable_count': super8_viable_count,
+                    'super8_detector_registration_y': super8_detector_registration_y,
+                    'super8_applied_motor_steps': int(cumulative_motor_steps),
+                    **phase,
                     'reacquire_attempted': reacquire_attempted,
                     'reacquire_valid': reacquire_valid,
                     'reacquire_steps': reacquire_steps,

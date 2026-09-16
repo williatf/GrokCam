@@ -28,14 +28,17 @@ class Super8Detector:
         self.last_selected = None
         self.last_candidates = []
 
-    def detect_calibration_candidates(self, frame_bgr):
-        """Return every complete candidate while preserving registration behavior."""
-        self.detect_registration(frame_bgr)
+    def detect_candidates(self, frame_bgr):
+        """Return complete candidates for a downstream phase associator."""
+        self.last_result = self.detect_registration(frame_bgr)
         return [
             dict(candidate)
             for candidate in self.last_candidates
             if candidate['classification'] == 'COMPLETE'
         ]
+
+    # Kept for the calibration tooling; production uses the neutral API above.
+    detect_calibration_candidates = detect_candidates
 
     @staticmethod
     def _gaussian(value, target, sigma):
@@ -208,4 +211,5 @@ class Super8Detector:
             'confidence': float(self.last_confidence),
             'threshold': float(self.last_threshold) if self.last_threshold is not None else None,
             'failure_reason': self.last_failure,
+            'candidates': [dict(candidate) for candidate in candidates],
         }
