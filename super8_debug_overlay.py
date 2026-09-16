@@ -13,6 +13,11 @@ def annotate_super8_debug_preview(
     crop_center_y=None,
     phase_reason=None,
     crop_source=None,
+    recovery_candidate_index=None,
+    recovery_distance_px=None,
+    recovery_age=0,
+    recovery_confirmations=0,
+    transport_eligible=False,
 ):
     """Return a diagnostic copy of a Super 8 preview.
 
@@ -23,7 +28,7 @@ def annotate_super8_debug_preview(
     debug = preview_bgr.copy()
     candidates = list(candidates or [])
 
-    for candidate in candidates:
+    for index, candidate in enumerate(candidates):
         cx = float(candidate['center_x'])
         cy = float(candidate['center_y'])
         width = float(candidate['width'])
@@ -32,16 +37,20 @@ def annotate_super8_debug_preview(
         y1 = int(round(cy - height / 2.0))
         x2 = int(round(cx + width / 2.0))
         y2 = int(round(cy + height / 2.0))
+        is_recovery = bool(
+            recovery_candidate_index is not None
+            and index == int(recovery_candidate_index)
+        )
         is_selected = bool(
             phase_trusted
             and selected_y is not None
             and abs(cy - float(selected_y)) < 1e-6
         )
-        color = (0, 220, 0) if is_selected else (180, 180, 0)
-        thickness = 3 if is_selected else 2
+        color = (0, 220, 0) if is_selected else (0, 165, 255) if is_recovery else (180, 180, 0)
+        thickness = 3 if is_selected or is_recovery else 2
         cv2.rectangle(debug, (x1, y1), (x2, y2), color, thickness)
         cv2.circle(debug, (int(round(cx)), int(round(cy))), 5, color, -1)
-        label = 'SELECTED' if is_selected else f'{cy:.1f}'
+        label = 'SELECTED' if is_selected else 'RECOVERY' if is_recovery else f'{cy:.1f}'
         cv2.putText(
             debug, label, (x1 + 4, max(16, y1 - 5)),
             cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA,
@@ -61,7 +70,10 @@ def annotate_super8_debug_preview(
     marker(registration_target_y, (0, 255, 255), 'registration target Y', 2)
     marker(crop_center_y, (255, 150, 0), 'crop center Y', 1)
 
-    phase_label = 'trusted' if phase_trusted else 'untrusted'
+    phase_label = 'trusted' if phase_trusted else (
+        phase_reason.replace('_', ' ') if phase_reason and phase_reason.startswith('recovery_')
+        else 'untrusted'
+    )
     lines = [
         f'Phase: {phase_label}' + (f' ({phase_reason})' if phase_reason else ''),
         f'Candidates: {len(candidates)}',
@@ -79,6 +91,11 @@ def annotate_super8_debug_preview(
         lines.append(f'Crop center: {float(crop_center_y):.1f}')
     if crop_source:
         lines.append(f'Crop source: {crop_source}')
+    if phase_reason and phase_reason.startswith('recovery_'):
+        lines.append(f'Recovery: {recovery_age}/{recovery_confirmations}')
+        if recovery_distance_px is not None:
+            lines.append(f'Recovery distance: {float(recovery_distance_px):.1f} px')
+    lines.append(f'Transport eligible: {"yes" if transport_eligible else "no"}')
 
     x, y = 8, 20
     line_height = 18

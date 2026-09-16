@@ -74,6 +74,96 @@ class Super8PhaseTrackerTests(unittest.TestCase):
         self.assertTrue(recovered.trusted)
         self.assertAlmostEqual(recovered.predicted_y, 500.0)
 
+    def test_multiple_untrusted_frames_accumulate_prediction_exactly_once(self):
+        tracker = self.tracker()
+        tracker.update([self.candidate(500)], 20)
+        first = tracker.update([], 19)
+        second = tracker.update([], 19)
+        self.assertAlmostEqual(first.predicted_y, 499.0)
+        self.assertAlmostEqual(second.predicted_y, 498.0)
+        self.assertAlmostEqual(tracker.predicted_y, 498.0)
+
+    def test_coherent_recovery_preserves_epoch_and_delays_trust(self):
+        tracker = self.tracker()
+        tracker.update([self.candidate(500)], 20)
+        results = [
+            tracker.update([self.candidate(535, score=0.1)], 20),
+            tracker.update([self.candidate(536, score=0.1)], 20),
+            tracker.update([self.candidate(537, score=0.1)], 20),
+        ]
+        self.assertEqual(
+            [result.reason for result in results],
+            ['recovery_started', 'recovery_confirming', 'recovery_established'],
+        )
+        self.assertTrue(all(not result.trusted for result in results))
+        self.assertEqual(tracker.phase_epoch, 0)
+        self.assertTrue(tracker.update([self.candidate(537)], 20).trusted)
+
+    def test_recovery_uses_geometry_not_detector_score(self):
+        tracker = self.tracker()
+        tracker.update([self.candidate(500)], 20)
+        poor_geometry = self.candidate(560, score=0.999)
+        poor_geometry.update({'center_x': 340, 'width': 80, 'height': 120, 'area': 90000})
+        result = tracker.update([
+            self.candidate(535, score=0.1), poor_geometry,
+        ], 20)
+        self.assertEqual(result.reason, 'recovery_started')
+        self.assertEqual(result.selected_candidate_index, 0)
+
+    def test_ambiguous_recovery_does_not_guess(self):
+        tracker = self.tracker()
+        tracker.update([self.candidate(500)], 20)
+        result = tracker.update([
+            self.candidate(535, score=0.1), self.candidate(538, score=0.99),
+        ], 20)
+        self.assertFalse(result.trusted)
+        self.assertNotEqual(result.reason, 'recovery_started')
+
+    def test_recovery_beyond_gate_falls_back_to_existing_reseed_path(self):
+        tracker = self.tracker()
+        tracker.update([self.candidate(500)], 20)
+        results = [tracker.update([], 20) for _ in range(3)]
+        self.assertEqual(tracker.update([self.candidate(700)], 20).reason, 'reseed_started')
+        self.assertTrue(all(not result.trusted for result in results))
+
+    def test_genuine_reseed_increments_epoch(self):
+        tracker = self.tracker()
+        tracker.update([self.candidate(500)], 20)
+        for _ in range(3):
+            tracker.update([], 20)
+        tracker.update([self.candidate(700)], 20)
+        tracker.update([self.candidate(700)], 20)
+        result = tracker.update([self.candidate(700)], 20)
+        self.assertTrue(result.trusted)
+        self.assertEqual(result.reason, 'reseeded')
+        self.assertEqual(result.phase_epoch, 1)
+
+    def test_recovery_horizon_exhaustion_is_untrusted_and_bounded(self):
+        tracker = Super8PhaseTracker(
+            pixels_per_step=1.0, expected_sprocket_pitch_px=20.0,
+            preview_size=(760, 570), motion_direction=-1,
+            recovery_horizon=2, reseed_confirmations=3,
+        )
+        tracker.update([self.candidate(500)], 20)
+        self.assertEqual(
+            tracker.update([self.candidate(535)], 20).reason,
+            'recovery_started',
+        )
+        result = tracker.update([self.candidate(536)], 20)
+        self.assertEqual(result.reason, 'recovery_horizon_exhausted')
+        self.assertFalse(result.trusted)
+
+    def test_candidate_diagnostics_include_replay_geometry_and_association(self):
+        tracker = self.tracker()
+        result = tracker.update([self.candidate(500), self.candidate(540)], 0)
+        diagnostic = result.candidate_diagnostics[0]
+        self.assertEqual(diagnostic['candidate_index'], 0)
+        self.assertEqual(diagnostic['association_status'], 'selected')
+        for key in ('center_x', 'center_y', 'x1', 'y1', 'x2', 'y2',
+                    'width', 'height', 'area', 'score',
+                    'inside_trusted_gate', 'inside_recovery_gate'):
+            self.assertIn(key, diagnostic)
+
     def test_prolonged_loss_without_candidates_remains_safe_and_does_not_crash(self):
         tracker = self.tracker()
         tracker.update([self.candidate(500)], 20)

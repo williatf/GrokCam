@@ -1875,6 +1875,11 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                         'phase_motion_direction': phase_tracker.motion_direction,
                         'phase_pixels_per_step': phase_tracker.pixels_per_step,
                         'phase_preview_size': list(phase_tracker.preview_size),
+                        'phase_recovery_gate_px': phase_tracker.recovery_gate_px,
+                        'phase_recovery_motion_tolerance_px': phase_tracker.recovery_motion_tolerance_px,
+                        'phase_recovery_geometry_tolerance': phase_tracker.recovery_geometry_tolerance,
+                        'phase_recovery_horizon': phase_tracker.recovery_horizon,
+                        'phase_recovery_ambiguity_margin_px': phase_tracker.recovery_ambiguity_margin_px,
                     })
                     full_sprockets = list(sprockets)
                     full_count = len(full_sprockets)
@@ -2180,6 +2185,11 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                         crop_center_y=crop_center_y,
                         phase_reason=phase_result.reason,
                         crop_source=crop_guidance['source'],
+                        recovery_candidate_index=phase_result.recovery_candidate_index,
+                        recovery_distance_px=phase_result.recovery_distance_px,
+                        recovery_age=phase_result.recovery_age,
+                        recovery_confirmations=phase_result.recovery_confirmations,
+                        transport_eligible=super8_controller_eligible,
                     )
                 encode_started = time.perf_counter()
                 ok, encoded = cv2.imencode(

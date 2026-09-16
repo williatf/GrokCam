@@ -54,6 +54,15 @@ class Super8DebugOverlayTests(unittest.TestCase):
         self.assertGreater(int(trusted[70].max()), 0)
         self.assertGreater(int(untrusted[58].max()), 0)
 
+    def test_recovery_candidate_is_visually_distinct(self):
+        output = annotate_super8_debug_preview(
+            self.image, self.candidates, selected_y=60.0,
+            phase_reason='recovery_confirming', recovery_candidate_index=0,
+            recovery_distance_px=35.0, recovery_age=2,
+            recovery_confirmations=2,
+        )
+        self.assertGreater(int(output[60, 40, 2]), int(output[60, 40, 1]))
+
     def test_missing_candidates_and_prediction_are_safe(self):
         output = annotate_super8_debug_preview(self.image)
         self.assertEqual(output.shape, self.image.shape)

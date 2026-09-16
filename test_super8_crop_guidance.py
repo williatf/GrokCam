@@ -78,5 +78,17 @@ class Super8CropGuidanceTests(unittest.TestCase):
         self.assertFalse(result.trusted)
         self.assertIsNone(result.selected_y)
 
+    def test_recovery_candidate_is_display_only_crop_guidance(self):
+        guidance = select_super8_crop_guidance(
+            self.result(
+                reason='recovery_confirming', selected_y=335.0,
+                predicted_y=300.0, recovery_age=2,
+            ),
+            last_safe_center_y=280.0,
+        )
+        self.assertEqual(guidance['source'], 'recovery_phase')
+        self.assertEqual(guidance['center_y'], 335.0)
+        self.assertEqual(guidance['prediction_age'], 2)
+
 if __name__ == '__main__':
     unittest.main()
