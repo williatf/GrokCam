@@ -182,9 +182,9 @@ Production manual controls in [app.py](../app.py:776) are:
 One-shot AE can be enabled, metadata read, and the result locked back to
 manual exposure/gain. One-shot AWB can similarly read `ColourGains` and lock
 the result. Focus preview temporarily enables AE with AWB off. Saved project
-settings are preferred for capture; a RAW capture without project settings
-uses `raw_exposure_time` or the lower of regular calibration exposure and 1114
-microseconds, at gain 1.0.
+settings are preferred for capture. When a project has no saved camera settings,
+RAW capture uses the shared camera-setting default of 3300 microseconds at gain
+1.0, so preview and DNG capture do not silently diverge.
 
 Current machine calibration on the Pi:
 

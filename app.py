@@ -39,6 +39,13 @@ from transport_calibration import (
     calculate_super8_stage1_transport,
     merge_calibration_settings,
 )
+from camera_settings import (
+    DEFAULT_CAMERA_EXPOSURE_TIME,
+    clamp_camera_settings as clamp_camera_settings_values,
+    build_camera_controls,
+    serialize_camera_settings,
+    deserialize_camera_settings,
+)
 import socket
 import os
 import re
@@ -48,7 +55,6 @@ from collections import deque
 RAW_CAPTURE_MODE = 'raw_dng_v1'
 RAW_SENSOR_SIZE = (2028, 1520)
 RAW_PREVIEW_SIZE = (760, 570)
-RAW_SAFE_DEFAULT_EXPOSURE_TIME = 1114
 
 async def troubleshoot_sprocket_detection(camera, websocket, tc, detector,
                                           step_size=None, delay=0.05):
@@ -582,7 +588,7 @@ def refresh_runtime_settings():
     pitch_px = settings.get("sprocket_pitch_px", 835)
     steps_per_pitch = settings.get("steps_per_pitch", 280)
     calib_res = settings.get("calibration_resolution", [2028,1520])
-    exposure_time = settings.get("exposure_time", 612)
+    exposure_time = settings.get("exposure_time", DEFAULT_CAMERA_EXPOSURE_TIME)
     gain = settings.get("gain", 1.0)
 
     if not pitch_px or not steps_per_pitch or not calib_res or not exposure_time or gain is None:
@@ -633,7 +639,7 @@ print(json.dumps(settings, indent=2))
 pitch_px = settings.get("sprocket_pitch_px", 835)
 steps_per_pitch = settings.get("steps_per_pitch", 280)
 calib_res = settings.get("calibration_resolution", [2028,1520])
-exposure_time = settings.get("exposure_time", 612)
+exposure_time = settings.get("exposure_time", DEFAULT_CAMERA_EXPOSURE_TIME)
 gain = settings.get("gain", 1.0)
 
 if not pitch_px or not steps_per_pitch or not calib_res or not exposure_time or gain is None:
@@ -647,13 +653,10 @@ CALIBRATION_RES = tuple(calib_res)
 EXPOSURE_TIME = exposure_time
 GAIN = gain
 
-CAMERA_EXPOSURE_MIN = 100
-CAMERA_EXPOSURE_MAX = 50000
-CAMERA_GAIN_MIN = 1.0
-CAMERA_GAIN_MAX = 16.0
-
+# Calibration exposure remains available to calibration routines. Camera-setting
+# defaults are intentionally independent so a new project starts at 3300 us.
 current_camera_settings = {
-    'ExposureTime': int(EXPOSURE_TIME),
+    'ExposureTime': int(DEFAULT_CAMERA_EXPOSURE_TIME),
     'AnalogueGain': float(GAIN),
     'ColourGains': None,
     'AeEnable': False,
@@ -704,18 +707,12 @@ def get_camera_settings_path(project_path=None):
 
 
 def clamp_camera_settings(exposure_time=None, analogue_gain=None):
-    requested_exposure = EXPOSURE_TIME if exposure_time is None else int(round(float(exposure_time)))
-    requested_gain = GAIN if analogue_gain is None else float(analogue_gain)
-    clamped_exposure = max(CAMERA_EXPOSURE_MIN, min(CAMERA_EXPOSURE_MAX, requested_exposure))
-    clamped_gain = max(CAMERA_GAIN_MIN, min(CAMERA_GAIN_MAX, requested_gain))
-    return {
-        'ExposureTime': int(clamped_exposure),
-        'AnalogueGain': float(clamped_gain),
-        'AeEnable': False,
-        'AwbEnable': False,
-        'exposure_clamped': clamped_exposure != requested_exposure,
-        'gain_clamped': clamped_gain != requested_gain,
-    }
+    return clamp_camera_settings_values(
+        exposure_time=exposure_time,
+        analogue_gain=analogue_gain,
+        default_exposure=DEFAULT_CAMERA_EXPOSURE_TIME,
+        default_gain=GAIN,
+    )
 
 
 def camera_settings_response_payload(settings_state=None):
@@ -723,7 +720,7 @@ def camera_settings_response_payload(settings_state=None):
     payload = {
         'event': 'camera_settings',
         'type': 'camera_settings',
-        'exposure_time': int(state.get('ExposureTime', EXPOSURE_TIME)),
+        'exposure_time': int(state.get('ExposureTime', DEFAULT_CAMERA_EXPOSURE_TIME)),
         'analogue_gain': float(state.get('AnalogueGain', GAIN)),
         'ae_enable': bool(state.get('AeEnable', False)),
         'awb_enable': bool(state.get('AwbEnable', False)),
@@ -780,17 +777,12 @@ def apply_manual_camera_settings(exposure_time=None, analogue_gain=None, source=
             f"[APP] Camera settings clamped: exposure={clamped['ExposureTime']} gain={clamped['AnalogueGain']:.3f}"
         )
 
-    controls = {
-        'ExposureTime': int(clamped['ExposureTime']),
-        'AnalogueGain': float(clamped['AnalogueGain']),
-        'AeEnable': False,
-        'AwbEnable': False,
-    }
     normalized_colour_gains = normalize_colour_gains(colour_gains)
-    if normalized_colour_gains is not None:
-        controls['ColourGains'] = normalized_colour_gains
-
-    camera.set_controls(controls)
+    camera.set_controls(build_camera_controls(
+        clamped['ExposureTime'],
+        clamped['AnalogueGain'],
+        normalized_colour_gains,
+    ))
     applied = set_current_camera_settings_state(
         clamped['ExposureTime'],
         clamped['AnalogueGain'],
@@ -815,30 +807,28 @@ def load_project_camera_settings(project_path=None, apply=False):
     with open(settings_path, 'r', encoding='utf-8') as handle:
         payload = json.load(handle)
 
-    clamped = clamp_camera_settings(
-        exposure_time=payload.get('ExposureTime', EXPOSURE_TIME),
-        analogue_gain=payload.get('AnalogueGain', GAIN),
-    )
-    colour_gains = payload.get('ColourGains')
+    loaded = deserialize_camera_settings(payload, default_gain=GAIN)
+    clamped = loaded
+    colour_gains = loaded.get('ColourGains')
     print(f"[APP] Loaded camera settings from {settings_path}")
     if apply:
         return apply_manual_camera_settings(
             clamped['ExposureTime'],
             clamped['AnalogueGain'],
-            source=payload.get('source', 'manual'),
+            source=loaded.get('source', 'manual'),
             saved=True,
             project_path=project_path or active_project_path,
-            timestamp=payload.get('timestamp'),
+            timestamp=loaded.get('timestamp'),
             colour_gains=colour_gains,
         )
 
     return set_current_camera_settings_state(
         clamped['ExposureTime'],
         clamped['AnalogueGain'],
-        source=payload.get('source', 'manual'),
+        source=loaded.get('source', 'manual'),
         saved=True,
         project_path=project_path or active_project_path,
-        timestamp=payload.get('timestamp'),
+        timestamp=loaded.get('timestamp'),
         colour_gains=colour_gains,
     )
 
@@ -862,7 +852,7 @@ def initialize_project_camera_settings(project_path=None, apply=False):
         return loaded
 
     return set_current_camera_settings_state(
-        EXPOSURE_TIME,
+        DEFAULT_CAMERA_EXPOSURE_TIME,
         GAIN,
         source='default',
         saved=False,
@@ -880,7 +870,7 @@ def apply_project_capture_camera_settings(project_path=None, prefer_saved=True):
 
     if current_camera_settings.get('project_path') == target_project_path:
         return apply_manual_camera_settings(
-            current_camera_settings.get('ExposureTime', EXPOSURE_TIME),
+            current_camera_settings.get('ExposureTime', DEFAULT_CAMERA_EXPOSURE_TIME),
             current_camera_settings.get('AnalogueGain', GAIN),
             source=current_camera_settings.get('source', 'default'),
             saved=current_camera_settings.get('saved', False),
@@ -890,7 +880,7 @@ def apply_project_capture_camera_settings(project_path=None, prefer_saved=True):
         )
 
     return apply_manual_camera_settings(
-        EXPOSURE_TIME,
+        DEFAULT_CAMERA_EXPOSURE_TIME,
         GAIN,
         source='default',
         saved=False,
@@ -904,22 +894,8 @@ def apply_capture_camera_controls():
 
 
 def apply_raw_capture_camera_controls():
-    """Use saved project controls, with a conservative RAW-only fallback."""
-    if has_project_manual_camera_settings(active_project_path):
-        return apply_project_capture_camera_settings(active_project_path, prefer_saved=True)
-
-    safe_exposure = int(settings.get(
-        'raw_exposure_time',
-        min(int(EXPOSURE_TIME), RAW_SAFE_DEFAULT_EXPOSURE_TIME),
-    ))
-    return apply_manual_camera_settings(
-        safe_exposure,
-        1.0,
-        source='raw_safe_default',
-        saved=False,
-        project_path=active_project_path,
-        colour_gains=current_camera_settings.get('ColourGains'),
-    )
+    """Use the same saved/default project controls as every production path."""
+    return apply_project_capture_camera_settings(active_project_path, prefer_saved=True)
 
 
 def apply_focus_camera_controls():
@@ -965,7 +941,7 @@ async def run_one_shot_auto_exposure(preview_active=False, settle_frames=12, set
         measured_exposure = _metadata_value(metadata, 'ExposureTime', 'SensorExposureTime')
         measured_gain = _metadata_value(metadata, 'AnalogueGain')
         if measured_exposure is None:
-            measured_exposure = current_camera_settings.get('ExposureTime', EXPOSURE_TIME)
+            measured_exposure = current_camera_settings.get('ExposureTime', DEFAULT_CAMERA_EXPOSURE_TIME)
         if measured_gain is None:
             measured_gain = current_camera_settings.get('AnalogueGain', GAIN)
 
@@ -1014,7 +990,7 @@ async def run_one_shot_auto_awb(preview_active=False, settle_frames=12, settle_d
             raise RuntimeError('Unable to read converged ColourGains from camera metadata')
 
         applied = apply_manual_camera_settings(
-            current_camera_settings.get('ExposureTime', EXPOSURE_TIME),
+            current_camera_settings.get('ExposureTime', DEFAULT_CAMERA_EXPOSURE_TIME),
             current_camera_settings.get('AnalogueGain', GAIN),
             source='auto_awb',
             saved=False,
@@ -1634,19 +1610,14 @@ def save_project_camera_settings(project_path=None):
 
     applied = get_active_camera_settings_state()
     settings_path = get_camera_settings_path(target_project_path)
-    payload = {
-        'ExposureTime': int(applied.get('ExposureTime', EXPOSURE_TIME)),
-        'AnalogueGain': float(applied.get('AnalogueGain', GAIN)),
-        'AeEnable': False,
-        'AwbEnable': False,
-        'source': 'manual',
-        'timestamp': datetime.now().isoformat(),
-    }
-    if applied.get('ColourGains') is not None:
-        payload['ColourGains'] = [
-            float(applied['ColourGains'][0]),
-            float(applied['ColourGains'][1]),
-        ]
+    timestamp = datetime.now().isoformat()
+    payload = serialize_camera_settings(
+        applied.get('ExposureTime', DEFAULT_CAMERA_EXPOSURE_TIME),
+        applied.get('AnalogueGain', GAIN),
+        applied.get('ColourGains'),
+        timestamp=timestamp,
+    )
+    payload['source'] = 'manual'
     with open(settings_path, 'w', encoding='utf-8') as handle:
         json.dump(payload, handle, indent=2)
         handle.write('\n')
@@ -2496,7 +2467,7 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                     'reacquire_ms': round(reacquire_ms, 2),
                     'anomaly_reasons': anomaly_reasons,
                     'anomaly_preview_path': anomaly_preview_path,
-                    'camera_exposure_time': int(camera_metadata.get('ExposureTime', applied_camera_settings.get('ExposureTime', EXPOSURE_TIME))),
+                    'camera_exposure_time': int(camera_metadata.get('ExposureTime', applied_camera_settings.get('ExposureTime', DEFAULT_CAMERA_EXPOSURE_TIME))),
                     'camera_analogue_gain': float(camera_metadata.get('AnalogueGain', applied_camera_settings.get('AnalogueGain', GAIN))),
                     'preview_clip_pct': round(preview_clip_pct, 3),
                     'timing_detection_ms': round(detection_ms, 2),
@@ -2866,7 +2837,7 @@ async def run_capture(websocket, num_frames, stop_event, preview_width=800, debu
                 'crop_y1': int(crop_meta.get('crop_y1', crop_y1)),
                 'crop_y2': int(crop_meta.get('crop_y2', crop_y2)),
                 'crop_clamped': bool(crop_meta.get('crop_clamped')),
-                'camera_exposure_time': int(applied_camera_settings.get('ExposureTime', EXPOSURE_TIME)),
+                'camera_exposure_time': int(applied_camera_settings.get('ExposureTime', DEFAULT_CAMERA_EXPOSURE_TIME)),
                 'camera_analogue_gain': float(applied_camera_settings.get('AnalogueGain', GAIN)),
                 'camera_settings_saved': bool(applied_camera_settings.get('saved', False)),
                 'camera_settings_source': applied_camera_settings.get('source', 'default'),
