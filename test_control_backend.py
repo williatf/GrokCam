@@ -90,10 +90,35 @@ class TcControlTransportTests(unittest.TestCase):
         self.assertEqual(self.count_writes(device, 104, 1), 3)
         self.assertEqual(self.count_writes(device, 101, 1), 2)
 
-    def test_cleanup_disables_outputs_and_closes_device(self):
+    def test_cleanup_disables_outputs_and_keeps_device_open(self):
         tc, device = self.make_control()
         tc.clean_up()
         tc.clean_up()
+        self.assertFalse(device.closed)
+        self.assertEqual(device.states[108 - 100], 0)
+        self.assertEqual(device.states[106 - 100], 0)
+        self.assertEqual(device.states[107 - 100], 0)
+        self.assertEqual(device.states[100 - 100], 0)
+
+    def test_cleanup_is_reusable_and_close_is_terminal(self):
+        tc, device = self.make_control()
+        tc.clean_up()
+        tc.light_on()
+        tc.light_off()
+        self.assertFalse(device.closed)
+
+        tc.close()
+        tc.close()
+        self.assertTrue(device.closed)
+        with self.assertRaisesRegex(RuntimeError, "controller is closed"):
+            tc.light_on()
+
+    def test_close_performs_output_cleanup_before_shutdown(self):
+        tc, device = self.make_control()
+        tc.light_on()
+        tc.feed_reel_on()
+        tc.takeup_reel_on()
+        tc.close()
         self.assertTrue(device.closed)
         self.assertEqual(device.states[108 - 100], 0)
         self.assertEqual(device.states[106 - 100], 0)

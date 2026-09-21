@@ -4208,5 +4208,5 @@ if __name__ == '__main__':
         asyncio.run(main())
     finally:
         print("Cleaning up")
-        tc.clean_up()
+        tc.close()
         camera.stop()

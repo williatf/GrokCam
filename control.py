@@ -232,5 +232,10 @@ class tcControl:
         self.feed_reel_off()
         self.takeup_reel_off()
         self._digital_write(self.STEPPER_PINS[2], 0)
+
+    def close(self):
+        if self._closed:
+            return
+        self.clean_up()
         self._device.close()
         self._closed = True
