@@ -116,7 +116,6 @@ v4l2-python3==0.3.2
 webencodings==0.5.1
 websockets==15.0.1
 Werkzeug==1.0.1
-wiringpi==2.60.1
 wrapt==1.12.1
 zope-event==6.0
 zope-interface==8.0

@@ -1,26 +1,14 @@
-import wiringpi as wiringpi
 import time
+
+from mcp23s17 import MCP23S17
+
 
 class tcControl:
     def __init__(self):
-        wiringpi.wiringPiSetup()
-        self.MCP23S17_ADDR = 0x20
-        self.MCP23S17_IODIRA = 0x00
-        self.MCP23S17_IODIRB = 0x01
-        self.MCP23S17_GPIOA = 0x12
-        self.MCP23S17_GPIOB = 0x13
-        wiringpi.mcp23s17Setup(100, 0, self.MCP23S17_ADDR)
-        wiringpi.pinMode(100, 1)  # Outputs for stepper, takeup, LED, shutter
-        wiringpi.pinMode(101, 1)
-        wiringpi.pinMode(102, 1)
-        wiringpi.pinMode(103, 1)
-        wiringpi.pinMode(104, 1)
-        wiringpi.pinMode(105, 1)
-        wiringpi.pinMode(106, 1)
-        wiringpi.pinMode(107, 1)
-        wiringpi.pinMode(108, 1)
-        wiringpi.pinMode(109, 1)
-        wiringpi.pinMode(110, 1)
+        self._device = MCP23S17()
+        self._closed = False
+        for pin in range(11):
+            self._device.configure_output(pin)
         self.STEPPER_PINS = [101, 102, 100]  # step, dir, enable
         self.STEPPER_PINS2 = [104, 103, 105]
         self.REEL_PINS = [106, 107]
@@ -47,11 +35,11 @@ class tcControl:
             'takeup_interval_before': None,
             'takeup_interval_after': None,
         }
-        wiringpi.digitalWrite(self.LED_PIN, 0)
-        wiringpi.digitalWrite(self.STEPPER_PINS[2], 0) #enable
-        wiringpi.digitalWrite(self.STEPPER_PINS2[2], 0) #enable
-        wiringpi.digitalWrite(self.STEPPER_PINS[1], 1) #direction forward
-        wiringpi.digitalWrite(self.STEPPER_PINS2[1], 1) #direction forward
+        self._digital_write(self.LED_PIN, 0)
+        self._digital_write(self.STEPPER_PINS[2], 0) #enable
+        self._digital_write(self.STEPPER_PINS2[2], 0) #enable
+        self._digital_write(self.STEPPER_PINS[1], 1) #direction forward
+        self._digital_write(self.STEPPER_PINS2[1], 1) #direction forward
 
         self.PUSHER_RATIO = 0.98 # push ~2% less than pull
         self.FEED_INTERVAL = 5000
@@ -61,14 +49,19 @@ class tcControl:
         self.ADVANCE_SETTLE_DELAY = 0.01
         self.POST_TAKEUP_SETTLE_DELAY = 0.01
 
+    def _digital_write(self, pin, value):
+        if self._closed:
+            raise RuntimeError("controller is closed")
+        self._device.write(int(pin) - 100, value)
+
     def light_on(self):
-        wiringpi.digitalWrite(self.LED_PIN, 1)
+        self._digital_write(self.LED_PIN, 1)
 
     def light_off(self):
-        wiringpi.digitalWrite(self.LED_PIN, 0)
+        self._digital_write(self.LED_PIN, 0)
 
     def set_reel_state(self, pin, enabled):
-        wiringpi.digitalWrite(pin, 1 if enabled else 0)
+        self._digital_write(pin, 1 if enabled else 0)
 
     def feed_reel_on(self):
         self.set_reel_state(self.FEED_REEL_PIN, True)
@@ -113,43 +106,43 @@ class tcControl:
             pusher_step = pusher_counter >= 1.0
 
             # --- STEP HIGH ---
-            wiringpi.digitalWrite(self.STEPPER_PINS2[0], 1)  # puller step
+            self._digital_write(self.STEPPER_PINS2[0], 1)  # puller step
             if pusher_step:
-                wiringpi.digitalWrite(self.STEPPER_PINS[0], 1)  # pusher step
+                self._digital_write(self.STEPPER_PINS[0], 1)  # pusher step
                 pusher_counter -= 1.0
 
             time.sleep(0.000001)
 
             # --- STEP LOW ---
-            wiringpi.digitalWrite(self.STEPPER_PINS2[0], 0)
+            self._digital_write(self.STEPPER_PINS2[0], 0)
             if pusher_step:
-                wiringpi.digitalWrite(self.STEPPER_PINS[0], 0)
+                self._digital_write(self.STEPPER_PINS[0], 0)
 
         feed_pulses, takeup_pulses = self._schedule_reel_pulses(steps)
         self._run_deferred_reel_pulses(steps, feed_pulses, takeup_pulses)
 
     def steps_back(self, steps=1):
-        wiringpi.digitalWrite(self.STEPPER_PINS[1], 0) #direction backwards
-        wiringpi.digitalWrite(self.STEPPER_PINS2[1], 0)
+        self._digital_write(self.STEPPER_PINS[1], 0) #direction backwards
+        self._digital_write(self.STEPPER_PINS2[1], 0)
         pusher_counter = 0.0
 
         for _ in range(steps):
             pusher_counter += self.PUSHER_RATIO
             pusher_step = pusher_counter >= 1.0
 
-            wiringpi.digitalWrite(self.STEPPER_PINS2[0], 1)
+            self._digital_write(self.STEPPER_PINS2[0], 1)
             if pusher_step:
-                wiringpi.digitalWrite(self.STEPPER_PINS[0], 1)
+                self._digital_write(self.STEPPER_PINS[0], 1)
                 pusher_counter -= 1.0
 
             time.sleep(0.000001)
 
-            wiringpi.digitalWrite(self.STEPPER_PINS2[0], 0)
+            self._digital_write(self.STEPPER_PINS2[0], 0)
             if pusher_step:
-                wiringpi.digitalWrite(self.STEPPER_PINS[0], 0)
+                self._digital_write(self.STEPPER_PINS[0], 0)
 
-        wiringpi.digitalWrite(self.STEPPER_PINS[1], 1) #direction back to foward
-        wiringpi.digitalWrite(self.STEPPER_PINS2[1], 1)
+        self._digital_write(self.STEPPER_PINS[1], 1) #direction back to foward
+        self._digital_write(self.STEPPER_PINS2[1], 1)
         feed_pulses, takeup_pulses = self._schedule_reel_pulses(steps)
         self._run_deferred_reel_pulses(steps, feed_pulses, takeup_pulses)
 
@@ -233,7 +226,11 @@ class tcControl:
         self.set_reel_state(pin, False)
 
     def clean_up(self):
+        if self._closed:
+            return
         self.light_off()
         self.feed_reel_off()
         self.takeup_reel_off()
-        wiringpi.digitalWrite(self.STEPPER_PINS[2], 0)
+        self._digital_write(self.STEPPER_PINS[2], 0)
+        self._device.close()
+        self._closed = True

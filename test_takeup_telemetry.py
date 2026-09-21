@@ -1,12 +1,10 @@
-import sys
-import types
 import unittest
 from unittest import mock
 
 
-# The GPIO module is Pi-only; importing the control class with a stub keeps
-# this test hardware-free while exercising the telemetry boundary.
-sys.modules.setdefault('wiringpi', types.SimpleNamespace())
+# Importing control remains hardware-free because the transport is only opened
+# when tcControl is constructed; these tests exercise the telemetry boundary
+# with a manually constructed controller.
 import control
 
 
