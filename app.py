@@ -12,6 +12,10 @@ from control import tcControl
 from registration import RegistrationTracker
 from sprocket import SprocketDetector
 from calibration_service import Regular8CalibrationService
+from regular8_geometry_calibration import (
+    Regular8GeometryCalibrator,
+    is_valid_frozen_geometry,
+)
 from calibration_dispatch import (
     PendingCalibrationProposal,
     calibration_route,
@@ -1703,6 +1707,48 @@ async def run_raw_capture(websocket, num_frames, stop_event):
         min_steps = int(nominal_steps_per_pitch * 0.88)
         max_steps = int(nominal_steps_per_pitch * 1.12)
         project_manifest = load_project_metadata(active_project_path)
+        geometry_calibrator = None
+        geometry_status = None
+        geometry_event_signature = None
+        if not super8_mode:
+            existing_geometry = project_manifest.get('capture_geometry')
+            if is_valid_frozen_geometry(existing_geometry):
+                geometry_status = {
+                    'state': 'calibrated',
+                    'film_format': film_format,
+                    'frozen': True,
+                    'samples': len(existing_geometry.get('calibration_frames', [])),
+                    'valid_samples': len(existing_geometry.get('calibration_frames', [])),
+                    'rejected_samples': 0,
+                    'total_samples': len(existing_geometry.get('calibration_frames', [])),
+                    'minimum_samples': 18,
+                    'stability_window': 12,
+                    'pitch_px': existing_geometry.get('sprocket_pitch_px'),
+                    'pitch_mad_px': existing_geometry.get('sprocket_pitch_mad_px'),
+                    'stability': 'frozen',
+                    'reason': None,
+                    'capture_geometry': existing_geometry,
+                }
+            else:
+                geometry_calibrator = Regular8GeometryCalibrator(
+                    source=active_project_path,
+                    raw_size=RAW_SENSOR_SIZE,
+                )
+                geometry_status = geometry_calibrator.status()
+            project_manifest['capture_geometry_status'] = geometry_status
+            project_manifest['capture_geometry_source'] = (
+                'automatic_capture_calibration' if geometry_status.get('frozen')
+                else 'automatic_capture_calibration_in_progress'
+            )
+            save_project_metadata(project_manifest, active_project_path)
+            geometry_event_signature = (
+                geometry_status.get('state'), geometry_status.get('samples'),
+                geometry_status.get('frozen'), geometry_status.get('reason'),
+            )
+            await websocket.send(json.dumps({
+                'event': 'regular8_geometry_status',
+                **geometry_status,
+            }))
         saved_transport_state = None
         if not super8_mode and next_frame_number > 1:
             saved_transport_state = project_manifest.get('transport_calibration_state')
@@ -1947,6 +1993,31 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                             raw_y = float(crosscheck_registration_y)
                             detection_method = 'fallback_validation'
                             raw_fast_detector.seed(full_sprockets, preview_bgr.shape)
+
+                if geometry_calibrator is not None:
+                    geometry_status = geometry_calibrator.add_frame(
+                        frame_number, preview_bgr, full_sprockets,
+                        transport_steps=cumulative_motor_steps,
+                    )
+                    event_signature = (
+                        geometry_status.get('state'), geometry_status.get('samples'),
+                        geometry_status.get('frozen'), geometry_status.get('reason'),
+                    )
+                    if event_signature != geometry_event_signature:
+                        geometry_event_signature = event_signature
+                        await websocket.send(json.dumps({
+                            'event': 'regular8_geometry_status',
+                            **geometry_status,
+                        }))
+                    if geometry_status.get('frozen'):
+                        project_manifest = load_project_metadata(active_project_path)
+                        project_manifest['capture_geometry'] = geometry_status['capture_geometry']
+                        project_manifest['capture_geometry_status'] = geometry_status
+                        project_manifest['capture_geometry_source'] = (
+                            'automatic_capture_calibration'
+                        )
+                        save_project_metadata(project_manifest, active_project_path)
+                        geometry_calibrator = None
 
                 takeup_adaptation = None
                 takeup_postpulse_1 = None
@@ -2477,6 +2548,18 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                     'timing_dng_wait_ms': round(dng_wait_ms, 2),
                     'timing_total_ms': round(total_ms, 2),
                     'discarded_stale_requests': int(discarded_requests),
+                    'geometry_calibration_state': (
+                        geometry_status.get('state') if geometry_status else None
+                    ),
+                    'geometry_calibration_samples': (
+                        geometry_status.get('samples') if geometry_status else None
+                    ),
+                    'geometry_calibration_frozen': (
+                        bool(geometry_status.get('frozen')) if geometry_status else False
+                    ),
+                    'geometry_calibration_reason': (
+                        geometry_status.get('reason') if geometry_status else None
+                    ),
                 }
                 append_registration_metadata(metadata_path, frame_metadata)
                 if not super8_mode and frame_index % 10 == 0:
@@ -2552,6 +2635,18 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                 if request is not None:
                     request.release()
 
+        if geometry_calibrator is not None:
+            geometry_status = geometry_calibrator.finalize()
+            project_manifest = load_project_metadata(active_project_path)
+            project_manifest['capture_geometry_status'] = geometry_status
+            project_manifest['capture_geometry_source'] = (
+                'automatic_capture_calibration_failed'
+            )
+            save_project_metadata(project_manifest, active_project_path)
+            await websocket.send(json.dumps({
+                'event': 'regular8_geometry_status',
+                **geometry_status,
+            }))
         project_manifest = load_project_metadata(active_project_path)
         final_transport_diagnostics = transport.diagnostics()
         final_transport_diagnostics['correction_mode'] = transport_correction_mode
@@ -2596,6 +2691,10 @@ async def run_raw_capture(websocket, num_frames, stop_event):
             'anomaly_count': anomaly_count,
             'anomaly_path': anomaly_path,
             'metadata_path': metadata_path,
+            'regular8_geometry_status': (
+                project_manifest.get('capture_geometry_status')
+                if not super8_mode else None
+            ),
         }))
         print(
             f"[APP] RAW capture complete: anomalies={anomaly_count}, "
