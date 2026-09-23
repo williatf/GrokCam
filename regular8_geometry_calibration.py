@@ -137,7 +137,12 @@ def _scale_box(box, preview_size, raw_size):
     )
 
 
-def _choose_pair(sprockets, frame_shape, pitch_range=(500.0, 1000.0)):
+def _choose_pair(
+    sprockets,
+    frame_shape,
+    pitch_range=(500.0, 1000.0),
+    expected_pitch=785.0,
+):
     if len(sprockets) < 2:
         return None
     frame_height = float(frame_shape[0])
@@ -151,7 +156,10 @@ def _choose_pair(sprockets, frame_shape, pitch_range=(500.0, 1000.0)):
             if not pitch_range[0] <= pitch <= pitch_range[1]:
                 continue
             midpoint = (float(upper[1]) + float(lower[1])) / 2.0
-            score = abs(pitch - 785.0) / 300.0 + abs(midpoint - center_y) / max(frame_height, 1.0)
+            score = (
+                abs(pitch - float(expected_pitch)) / 300.0
+                + abs(midpoint - center_y) / max(frame_height, 1.0)
+            )
             score += abs(float(upper[0]) - float(lower[0])) / max(frame_width, 1.0)
             candidates.append((score, upper, lower))
     if not candidates:
@@ -234,6 +242,7 @@ class Regular8GeometryCalibrator:
         self.total_samples = 0
         self.frozen_geometry = None
         self._last_signature = None
+        self._last_reason = None
 
     @property
     def frozen(self):
@@ -241,6 +250,12 @@ class Regular8GeometryCalibrator:
 
     def status(self):
         values = self._series(self.samples, "sprocket_pitch")
+        if self.frozen:
+            pitch_px = self.frozen_geometry["sprocket_pitch_px"]
+            pitch_mad_px = self.frozen_geometry["sprocket_pitch_mad_px"]
+        else:
+            pitch_px = None if not values else float(statistics.median(_robust(values)))
+            pitch_mad_px = _mad(_robust(values))
         state = "calibrated" if self.frozen else "calibrating"
         return {
             "state": state,
@@ -252,10 +267,10 @@ class Regular8GeometryCalibrator:
             "total_samples": self.total_samples,
             "minimum_samples": self.min_valid_samples,
             "stability_window": self.stability_window,
-            "pitch_px": None if not values else float(statistics.median(_robust(values))),
-            "pitch_mad_px": _mad(_robust(values)),
+            "pitch_px": pitch_px,
+            "pitch_mad_px": pitch_mad_px,
             "stability": self._stability_message(),
-            "reason": None,
+            "reason": self._last_reason,
             "capture_geometry": self.frozen_geometry,
         }
 
@@ -264,26 +279,51 @@ class Regular8GeometryCalibrator:
         if self.frozen:
             return self.status()
 
+        if not self._valid_sprocket_observations(sprockets):
+            return self._reject(frame_id, "malformed_sprocket_observation")
+
         measurement, reason = self._measure(frame_id, frame_bgr, sprockets)
         if measurement is None:
-            self.rejected_samples.append({"frame": int(frame_id), "reason": reason})
-            result = self.status()
-            result["reason"] = reason
-            return result
+            return self._reject(frame_id, reason)
 
         signature = self._signature(frame_bgr)
         if self._last_signature is not None and np.max(np.abs(signature - self._last_signature)) < 0.5:
-            self.rejected_samples.append({"frame": int(frame_id), "reason": "stationary_frame"})
-            result = self.status()
-            result["reason"] = "stationary_frame"
-            return result
+            return self._reject(frame_id, "stationary_frame")
         self._last_signature = signature
         measurement["frame"] = int(frame_id)
         measurement["transport_steps"] = None if transport_steps is None else int(transport_steps)
         self.samples.append(measurement)
 
+        self._last_reason = None
         if self._is_stable():
-            self.frozen_geometry = self._build_geometry()
+            stable_samples = self.samples[-self.stability_window:]
+            candidate = self._build_geometry(stable_samples)
+            if is_valid_frozen_geometry(candidate):
+                self.frozen_geometry = candidate
+            else:
+                self._last_reason = "frozen_geometry_failed_validation"
+        return self.status()
+
+    @staticmethod
+    def _valid_sprocket_observations(sprockets):
+        if not isinstance(sprockets, (list, tuple)):
+            return False
+        for item in sprockets:
+            if not isinstance(item, (list, tuple)) or len(item) != 5:
+                return False
+            try:
+                values = [float(value) for value in item]
+            except (TypeError, ValueError, OverflowError):
+                return False
+            if not all(math.isfinite(value) for value in values):
+                return False
+            if values[2] <= 0 or values[3] <= 0 or values[4] < 0:
+                return False
+        return True
+
+    def _reject(self, frame_id, reason):
+        self.rejected_samples.append({"frame": int(frame_id), "reason": reason})
+        self._last_reason = reason
         return self.status()
 
     def finalize(self):
@@ -304,6 +344,7 @@ class Regular8GeometryCalibrator:
         capture_pair = _choose_pair(
             sprockets, frame_bgr.shape,
             pitch_range=(500.0 / preview_scale_y, 1000.0 / preview_scale_y),
+            expected_pitch=785.0 / preview_scale_y,
         )
         if capture_pair is None:
             return None, "no_capture_pair"
@@ -397,15 +438,15 @@ class Regular8GeometryCalibrator:
             return "insufficient_stable_sprocket_measurements"
         return "geometry_variation_above_threshold"
 
-    def _build_geometry(self):
+    def _build_geometry(self, samples):
         def median(key):
-            return float(statistics.median(_robust(self._series(self.samples, key))))
+            return float(statistics.median(_robust(self._series(samples, key))))
 
         def mad(key):
-            return float(_mad(_robust(self._series(self.samples, key))) or 0.0)
+            return float(_mad(_robust(self._series(samples, key))) or 0.0)
 
         quality = {
-            key: _summary(self._series(self.samples, key))
+            key: _summary(self._series(samples, key))
             for key in (
                 "sprocket_pitch", "p15_image_support_width",
                 "p15_image_support_height", "sprocket_x",
@@ -431,7 +472,7 @@ class Regular8GeometryCalibrator:
             "calibration_timestamp": datetime.now(timezone.utc).isoformat(),
             "source": self.source,
             "frozen": True,
-            "calibration_frames": [sample["frame"] for sample in self.samples],
+            "calibration_frames": [sample["frame"] for sample in samples],
             "sprocket_pitch_px": median("sprocket_pitch"),
             "sprocket_pitch_mad_px": mad("sprocket_pitch"),
             "sprocket_width_px": median("p15_image_support_width"),
