@@ -84,6 +84,9 @@ class tcControl:
         self._adaptive_takeup_enabled = True
         self._takeup_frame_counter = 0
         self._takeup_interval_frames = max(1, int(interval_frames))
+        # RAW capture owns the frame-based scheduler.  Do not let a residual
+        # legacy step accumulator from another capture affect its first pulse.
+        self.takeup_steps_taken = 0
 
     def set_takeup_interval_frames(self, interval_frames):
         if not self._adaptive_takeup_enabled:
@@ -94,6 +97,7 @@ class tcControl:
         self._adaptive_takeup_enabled = False
         self._takeup_frame_counter = 0
         self._takeup_interval_frames = None
+        self.takeup_steps_taken = 0
 
     def steps_forward(self, steps=1):
         # Puller is master, always moves

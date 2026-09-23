@@ -81,6 +81,23 @@ class AdaptiveTakeupIntervalControllerTests(unittest.TestCase):
         c.reset()
         self.assertEqual(c.interval_frames, 12)
 
+    def test_regular8_tuning_starts_near_legacy_frame_cadence(self):
+        c = AdaptiveTakeupIntervalController(
+            initial_interval=10, min_interval=8, max_interval=32,
+        )
+        self.assertEqual(c.interval_frames, 10)
+        self.assertEqual((c.min_interval, c.max_interval), (8, 32))
+
+    def test_regular8_disturbance_can_lengthen_with_same_controller(self):
+        c = AdaptiveTakeupIntervalController(
+            initial_interval=10, min_interval=8, max_interval=32,
+            filter_window=1,
+        )
+        decision = c.decide(1, 20.0, trusted=True)
+        self.assertEqual(decision.interval_after, 14)
+        self.assertEqual(decision.adaptation_delta, 4)
+        self.assertLessEqual(c.interval_frames, 32)
+
 
 if __name__ == '__main__':
     unittest.main()

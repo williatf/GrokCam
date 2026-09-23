@@ -84,9 +84,14 @@ class _Camera:
 
 
 class _Transport:
+    TAKEUP_PULSE_DURATION = 0.2
+
     def __init__(self):
         self.commands = []
         self.cleaned = False
+        self.takeup_begin_intervals = []
+        self.takeup_interval_updates = []
+        self.takeup_ended = 0
 
     def light_on(self):
         pass
@@ -98,10 +103,13 @@ class _Transport:
         return {}
 
     def begin_takeup_capture(self, _interval):
-        pass
+        self.takeup_begin_intervals.append(int(_interval))
+
+    def set_takeup_interval_frames(self, interval):
+        self.takeup_interval_updates.append(int(interval))
 
     def end_takeup_capture(self):
-        pass
+        self.takeup_ended += 1
 
     def clean_up(self):
         self.cleaned = True
@@ -331,6 +339,20 @@ class RawCaptureGeometryLifecycleTests(unittest.IsolatedAsyncioTestCase):
             for event in result["websocket"].events
         ))
         self.assertNotIn("capture_geometry_status", result["metadata"])
+
+    async def test_regular8_uses_capture_local_adaptive_takeup(self):
+        result = await self.run_capture("regular8-takeup", frames=3)
+        self.assertIsNone(result["error"])
+        self.assertEqual(result["transport"].takeup_begin_intervals, [10])
+        self.assertEqual(result["transport"].takeup_ended, 1)
+
+    async def test_super8_retains_existing_adaptive_takeup_interval(self):
+        result = await self.run_capture(
+            "super8-takeup", frames=3, film_format=FILM_FORMAT_SUPER8,
+        )
+        self.assertIsNone(result["error"])
+        self.assertEqual(result["transport"].takeup_begin_intervals, [12])
+        self.assertEqual(result["transport"].takeup_ended, 1)
 
 
 if __name__ == "__main__":

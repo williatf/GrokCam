@@ -82,6 +82,23 @@ class TakeupTelemetryTests(unittest.TestCase):
         self.assertEqual(sum(pulses), 1)
         self.assertEqual(pulses[-1], 1)
 
+    def test_regular8_interval_counts_ten_capture_frames(self):
+        tc = self.make_control()
+        tc.takeup_steps_taken = 2_499
+        tc.begin_takeup_capture(10)
+        pulses = [tc._schedule_reel_pulses(308)[1] for _ in range(10)]
+        self.assertEqual(sum(pulses), 1)
+        self.assertEqual(pulses[-1], 1)
+        self.assertEqual(tc.takeup_steps_taken, 0)
+
+    def test_end_adaptive_capture_clears_legacy_accumulator(self):
+        tc = self.make_control()
+        tc.takeup_steps_taken = 1_234
+        tc.begin_takeup_capture(10)
+        tc.end_takeup_capture()
+        self.assertEqual(tc.takeup_steps_taken, 0)
+        self.assertFalse(tc._adaptive_takeup_enabled)
+
 
 if __name__ == '__main__':
     unittest.main()

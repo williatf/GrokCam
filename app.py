@@ -388,6 +388,17 @@ def get_project_film_format(project_path=None):
     return normalize_film_format(metadata.get('film_format', FILM_FORMAT_REGULAR8))
 
 
+def build_takeup_interval_controller(film_format):
+    """Build the capture-local take-up scheduler for a film format."""
+    # Regular 8's legacy 2500-step cadence is approximately ten frames at
+    # its normal transport command.  Super 8 retains its established tuning.
+    return AdaptiveTakeupIntervalController(
+        initial_interval=12 if film_format == FILM_FORMAT_SUPER8 else 10,
+        min_interval=8,
+        max_interval=32,
+    )
+
+
 def get_effective_crop_settings(project_path=None):
     project_metadata = load_project_metadata(project_path)
     project_crop = project_metadata.get('crop')
@@ -1830,12 +1841,15 @@ async def run_raw_capture(websocket, num_frames, stop_event):
         last_safe_crop_center_y = None
         anomaly_count = 0
         frames_since_takeup_pulse = None
-        takeup_interval_controller = (
-            AdaptiveTakeupIntervalController()
-            if super8_mode else None
+        takeup_interval_controller = build_takeup_interval_controller(film_format)
+        tc.begin_takeup_capture(takeup_interval_controller.interval_frames)
+        print(
+            f"[APP] RAW take-up controller: film_format={film_format} "
+            f"initial_interval={takeup_interval_controller.initial_interval} "
+            f"min_interval={takeup_interval_controller.min_interval} "
+            f"max_interval={takeup_interval_controller.max_interval} "
+            f"pulse_duration={tc.TAKEUP_PULSE_DURATION:.3f}s"
         )
-        if takeup_interval_controller is not None:
-            tc.begin_takeup_capture(takeup_interval_controller.interval_frames)
         takeup_pulse_context = None
 
         for frame_index in range(1, int(num_frames) + 1):
@@ -1849,6 +1863,11 @@ async def run_raw_capture(websocket, num_frames, stop_event):
             )
             if takeup_telemetry.get('takeup_pulse_started'):
                 frames_since_takeup_pulse = 0
+                print(
+                    f"[APP] RAW take-up pulse: film_format={film_format} "
+                    f"sequence={takeup_telemetry.get('takeup_pulse_sequence')} "
+                    f"interval={takeup_telemetry.get('takeup_interval_frames')}"
+                )
             elif frames_since_takeup_pulse is not None:
                 frames_since_takeup_pulse += 1
             cumulative_motor_steps += int(current_steps)
@@ -2007,58 +2026,94 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                 takeup_adaptation = None
                 takeup_postpulse_1 = None
                 takeup_postpulse_2 = None
-                if super8_mode:
-                    # The phase residual is relative to the calibrated phase
-                    # prediction, so ordinary frame advance is excluded from
-                    # the pulse disturbance measurement.  This is display /
-                    # take-up adaptation telemetry only; it never changes
-                    # phase trust or main transport eligibility.
-                    if takeup_pulse_context is not None:
-                        pulse_age = frame_number - takeup_pulse_context['frame']
+                # The phase residual is relative to the calibrated phase
+                # prediction, so ordinary frame advance is excluded from the
+                # Super 8 pulse disturbance measurement.  Regular 8 uses the
+                # change from the last trusted registration measurement for
+                # the same purpose.  This is take-up adaptation telemetry
+                # only; it never changes main transport eligibility.
+                if takeup_pulse_context is not None:
+                    pulse_age = frame_number - takeup_pulse_context['frame']
+                    if super8_mode:
                         response_value = phase_result.error_px
-                        response = {
-                            'displacement_px': response_value,
-                            'source': (
-                                'trusted_phase_residual'
-                                if response_value is not None and phase_result.trusted
-                                else 'untrusted_phase_candidate'
-                                if response_value is not None else None
-                            ),
-                            'trusted': bool(phase_result.trusted),
-                        }
-                        if pulse_age == 1:
-                            takeup_postpulse_1 = response
-                            plausible_loss = (
-                                not phase_result.trusted
-                                and response_value is not None
-                                and phase_result.reason in {
-                                    'candidate_outside_phase_gate',
-                                    'recovery_started',
-                                    'recovery_confirming',
-                                    'ambiguous_phase',
-                                }
+                        response_trusted = bool(phase_result.trusted)
+                        response_source = (
+                            'trusted_phase_residual'
+                            if response_value is not None and response_trusted
+                            else 'untrusted_phase_candidate'
+                            if response_value is not None else None
+                        )
+                        plausible_loss = (
+                            not response_trusted
+                            and response_value is not None
+                            and phase_result.reason in {
+                                'candidate_outside_phase_gate',
+                                'recovery_started',
+                                'recovery_confirming',
+                                'ambiguous_phase',
+                            }
+                        )
+                    else:
+                        reference_y = raw_tracker.predicted_y()
+                        response_value = (
+                            abs(float(raw_y) - float(reference_y))
+                            if raw_y is not None and reference_y is not None
+                            and raw_mode == 'pair'
+                            and full_count >= 2
+                            and partial_count == 0
+                            and 'registration_phase_jump' not in anomaly_reasons
+                            and (
+                                detector_disagreement_px is None
+                                or detector_disagreement_px <= 20.0
+                                or detection_method == 'fallback_validation'
                             )
-                            takeup_adaptation = takeup_interval_controller.decide(
-                                takeup_pulse_context['sequence'],
-                                disturbance_px=response_value,
-                                trusted=bool(phase_result.trusted),
-                                plausible_phase_loss=plausible_loss,
-                            )
-                            tc.set_takeup_interval_frames(
-                                takeup_adaptation.interval_after
-                            )
-                            takeup_pulse_context['postpulse_1'] = response
-                        elif pulse_age == 2:
-                            takeup_postpulse_1 = takeup_pulse_context.get('postpulse_1')
-                            takeup_postpulse_2 = response
-                        if pulse_age >= 2:
-                            takeup_pulse_context = None
+                            else None
+                        )
+                        response_trusted = response_value is not None
+                        response_source = (
+                            'trusted_registration_delta'
+                            if response_trusted else None
+                        )
+                        plausible_loss = False
 
-                    if takeup_telemetry.get('takeup_pulse_started'):
-                        takeup_pulse_context = {
-                            'frame': frame_number,
-                            'sequence': takeup_telemetry.get('takeup_pulse_sequence'),
-                        }
+                    response = {
+                        'displacement_px': response_value,
+                        'source': response_source,
+                        'trusted': response_trusted,
+                    }
+                    if pulse_age == 1:
+                        takeup_postpulse_1 = response
+                        takeup_adaptation = takeup_interval_controller.decide(
+                            takeup_pulse_context['sequence'],
+                            disturbance_px=response_value,
+                            trusted=response_trusted,
+                            plausible_phase_loss=plausible_loss,
+                        )
+                        tc.set_takeup_interval_frames(
+                            takeup_adaptation.interval_after
+                        )
+                        if takeup_adaptation.adaptation_applied:
+                            print(
+                                f"[APP] RAW take-up interval adjusted: "
+                                f"film_format={film_format} "
+                                f"sequence={takeup_adaptation.pulse_sequence} "
+                                f"disturbance={takeup_adaptation.disturbance_filtered_px} "
+                                f"interval={takeup_adaptation.interval_before}"
+                                f"->{takeup_adaptation.interval_after} "
+                                f"reason={takeup_adaptation.adaptation_reason}"
+                            )
+                        takeup_pulse_context['postpulse_1'] = response
+                    elif pulse_age == 2:
+                        takeup_postpulse_1 = takeup_pulse_context.get('postpulse_1')
+                        takeup_postpulse_2 = response
+                    if pulse_age >= 2:
+                        takeup_pulse_context = None
+
+                if takeup_telemetry.get('takeup_pulse_started'):
+                    takeup_pulse_context = {
+                        'frame': frame_number,
+                        'sequence': takeup_telemetry.get('takeup_pulse_sequence'),
+                    }
                 detection_ms = (time.perf_counter() - detection_started) * 1000.0
                 tracked = raw_tracker.update(
                     raw_registration_y=raw_y,
@@ -2472,19 +2527,20 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                     'takeup_timestamp': takeup_telemetry.get('takeup_timestamp'),
                     'takeup_interval_initial_frames': (
                         takeup_interval_controller.initial_interval
-                        if super8_mode else None
+                        if takeup_interval_controller is not None else None
                     ),
                     'takeup_interval_min_frames': (
                         takeup_interval_controller.min_interval
-                        if super8_mode else None
+                        if takeup_interval_controller is not None else None
                     ),
                     'takeup_interval_max_frames': (
                         takeup_interval_controller.max_interval
-                        if super8_mode else None
+                        if takeup_interval_controller is not None else None
                     ),
                     'takeup_interval_frames': (
                         takeup_interval_controller.interval_frames
-                        if super8_mode else takeup_telemetry.get('takeup_interval_frames')
+                        if takeup_interval_controller is not None
+                        else takeup_telemetry.get('takeup_interval_frames')
                     ),
                     'takeup_interval_before': (
                         takeup_adaptation.interval_before
@@ -2730,7 +2786,7 @@ async def run_raw_capture(websocket, num_frames, stop_event):
                 await send_regular8_geometry_status(websocket, geometry_status)
             except Exception as exc:
                 print(f"[APP] Regular 8 geometry finalization failed: {exc}")
-        if super8_mode and hasattr(tc, 'end_takeup_capture'):
+        if takeup_interval_controller is not None and hasattr(tc, 'end_takeup_capture'):
             tc.end_takeup_capture()
         tc.clean_up()
         camera.stop()
